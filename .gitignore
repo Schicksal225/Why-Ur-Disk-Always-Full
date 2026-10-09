@@ -1,0 +1,19 @@
+# build output
+build/
+dist/
+release/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# personal data written next to the app at run time
+config.json
+history.json
+scan_cache.json
+exports/
+
+# local tooling
+.preview/
+.playwright-mcp/
+*.log

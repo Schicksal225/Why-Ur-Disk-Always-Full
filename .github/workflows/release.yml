@@ -1,0 +1,38 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build (tests, exe, zip)
+        shell: cmd
+        env:
+          SKIP_SMOKE: "1"
+        run: build_release.bat
+      - name: Smoke test (window must open)
+        shell: powershell
+        continue-on-error: true
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\smoke_exe.ps1 -Exe dist\PCOptimizer.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PCOptimizer-win64
+          path: |
+            release/*.zip
+            release/CHECKSUMS.txt
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.zip
+            release/CHECKSUMS.txt
