@@ -10,7 +10,7 @@ A local disk audit tool for Windows. It shows what is stored on each drive, whic
 
 1. Download `PCOptimizer-v*-win64.zip` from the Releases page.
 2. Unzip it and run `PCOptimizer.exe`.
-3. Open "Storage" (存储盘查), pick a drive, and click start.
+3. Open "Storage", pick a drive, and click start.
 
 The exe is not code-signed, so SmartScreen may warn on first launch: click "More info", then "Run anyway". The Microsoft Edge WebView2 runtime is required; it ships with Windows 11 and recent Windows 10, and the app shows a download link if it is missing. Verify the download against `CHECKSUMS.txt` (SHA256).
 
