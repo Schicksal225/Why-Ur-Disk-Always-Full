@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -169,14 +168,10 @@ def _proc_username(proc: psutil.Process) -> str:
 def collect_system_snapshot(
     top_n: int = 30,
     cpu_interval: float = 0.5,
-    baseline: dict[str, Any] | None = None,
     process_whitelist: list[str] | None = None,
     current_pid: int | None = None,
 ) -> SystemSnapshot:
     mem = psutil.virtual_memory()
-
-    baseline_cpu = (baseline or {}).get("cpu_percent", 0) or 0
-    baseline_procs: dict[str, float] = (baseline or {}).get("top_processes", {}) or {}
 
     # Prime CPU counters (first call always returns 0.0)
     psutil.cpu_percent(interval=None)
@@ -211,17 +206,12 @@ def collect_system_snapshot(
 
             suspicious = False
             susp_reason = ""
-            base_mem = baseline_procs.get(name.lower(), 0)
-            if baseline:
-                if cpu > max(15, baseline_cpu * 2) and cpu > 5:
-                    suspicious = True
-                    susp_reason = f"CPU 偏高 ({cpu:.1f}%)"
-                elif rss_mb > max(200, base_mem * 1.8) and rss_mb > 100:
-                    suspicious = True
-                    susp_reason = f"内存偏高 ({rss_mb:.0f} MB)"
-                elif name.lower() in baseline_procs and rss_mb > base_mem * 2.5 and rss_mb > 50:
-                    suspicious = True
-                    susp_reason = f"内存较基线翻倍 ({rss_mb:.0f} vs {base_mem:.0f} MB)"
+            if cpu > 50:
+                suspicious = True
+                susp_reason = f"CPU 偏高 ({cpu:.1f}%)"
+            elif rss_mb > 1500:
+                suspicious = True
+                susp_reason = f"内存偏高 ({rss_mb:.0f} MB)"
 
             processes.append(
                 ProcessInfo(
@@ -250,22 +240,6 @@ def collect_system_snapshot(
         memory_total_gb=round(mem.total / 1024 ** 3, 2),
         processes=top,
     )
-
-
-def build_baseline_snapshot(current_pid: int | None = None) -> dict[str, Any]:
-    snap = collect_system_snapshot(
-        top_n=50, cpu_interval=1.0, current_pid=current_pid
-    )
-    top_map: dict[str, float] = {}
-    for p in snap.processes:
-        key = p.name.lower()
-        top_map[key] = max(top_map.get(key, 0), round(p.memory_mb, 1))
-    return {
-        "cpu_percent": round(snap.cpu_percent, 1),
-        "memory_percent": round(snap.memory_percent, 1),
-        "memory_used_gb": snap.memory_used_gb,
-        "top_processes": top_map,
-    }
 
 
 def kill_processes(
@@ -528,13 +502,12 @@ def generate_memory_advice(
 def generate_suggestions(
     disk_usage: list[dict[str, float | str]],
     snapshot: SystemSnapshot,
-    baseline: dict[str, Any] | None,
 ) -> list[str]:
     tips: list[str] = []
     c_drive = next((d for d in disk_usage if d.get("drive") == "C"), None)
     if c_drive and float(c_drive.get("free_gb", 0)) < 30:
         tips.append(
-            f"C 盘剩余仅 {c_drive['free_gb']} GB，建议优先执行「安全清理」并考虑将 Downloads 迁到 E 盘。"
+            f"C 盘剩余仅 {c_drive['free_gb']} GB，建议先到「存储盘查」看看是什么占了空间，再考虑把下载目录迁到其他盘。"
         )
     if snapshot.memory_percent > 85:
         tips.append(
@@ -551,10 +524,7 @@ def generate_suggestions(
     suspicious = [p for p in snapshot.processes if p.suspicious]
     if suspicious:
         names = ", ".join(f"{p.name}({p.suspicious_reason})" for p in suspicious[:5])
-        tips.append(f"相对基线异常进程: {names}")
-    if baseline is None:
-        tips.append("尚未记录性能基线，建议在系统较空闲时到「设置/记忆」中记录基线。")
-    tips.append("E 盘项目依赖的 node_modules、.pnpm-store、Docker 数据已自动保护，不会被清理。")
+        tips.append(f"占用偏高的进程: {names}")
     tips.append("可在 Windows 设置 → 系统 → 存储 中开启「存储感知」自动清理临时文件。")
-    tips.append("定期将 C 盘大文件（安装包、ISO、视频）移至 D/E 盘可显著缓解空间压力。")
+    tips.append("定期将 C 盘大文件（安装包、ISO、视频）移到其他盘可明显缓解空间压力。")
     return tips

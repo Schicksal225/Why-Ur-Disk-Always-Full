@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from core.classifier import classify_file, classify_scan
-from core.scanner import DirNode, FileRecord, ScanResult
+from core.scanner import DirNode, ScanResult
 
 
 def _result(**kwargs) -> ScanResult:

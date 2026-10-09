@@ -56,11 +56,10 @@ class Api:
         snap = collect_system_snapshot(
             top_n=5,
             cpu_interval=0.2,
-            baseline=self._store.get_baseline(),
             process_whitelist=self._store.process_whitelist,
             current_pid=os.getpid(),
         )
-        tips = generate_suggestions(disks, snap, self._store.get_baseline())
+        tips = generate_suggestions(disks, snap)
         return {"disks": disks, "snapshot": _snapshot(snap), "tips": tips, "categories": self._categories}
 
     def load_cached(self) -> dict:
@@ -182,7 +181,6 @@ class Api:
         snap = collect_system_snapshot(
             top_n=40,
             cpu_interval=0.4,
-            baseline=self._store.get_baseline(),
             process_whitelist=self._store.process_whitelist,
             current_pid=os.getpid(),
         )
