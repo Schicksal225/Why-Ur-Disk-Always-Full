@@ -15,7 +15,7 @@ from core.cleaner import build_targets, execute_target, format_bytes, get_disk_u
 from core.classifier import classify_scan, findings_from_duplicates
 from core.duplicates import find_duplicates
 from core.executor import execute_findings
-from core.handoff import export_handoff, export_scope_projects, needs_rescan
+from core.handoff import export_handoff, is_export_path, needs_rescan
 from core.perf import collect_system_snapshot, generate_memory_advice, generate_suggestions, kill_processes
 from core.projects import finalize_projects
 from core.scanner import load_audit_cache, result_from_dict, result_to_dict, save_audit_cache, scan_path
@@ -163,7 +163,7 @@ class Api:
         return self._jobs.start("clean", work)
 
     def export_handoff(self) -> dict:
-        if not export_scope_projects(self._projects):
+        if not any(is_export_path(result.root) for result in self._results):
             return {"ok": False, "error": "请先盘查 D 盘或 E 盘"}
         if needs_rescan(self._projects):
             return {"ok": False, "error": "这份盘查结果来自旧版本，没有可重建目录的路径。请重新盘查 D、E 盘后再导出"}

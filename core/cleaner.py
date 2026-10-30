@@ -56,6 +56,7 @@ def _tree_bytes(
     min_file_bytes: int = 0,
     name_glob: str | None = None,
     skip_names: frozenset[str] = _SKIP_DIR_NAMES,
+    recursive: bool = True,
 ) -> int:
     """Read-only size of a tree by plain directory enumeration.
 
@@ -99,7 +100,7 @@ def _tree_bytes(
                     if attrs & _ATTR_REPARSE:
                         continue
                     if attrs & _ATTR_DIRECTORY:
-                        if entry.name.lower() not in skip_names:
+                        if recursive and entry.name.lower() not in skip_names:
                             stack.append(entry.path)
                     elif counts(entry.name, info):
                         total += int(info.st_size)
@@ -257,7 +258,8 @@ def scan_target(target: CleanTarget, protected_paths: Iterable[str], min_age_day
     if target.id == "downloads_report":
         return sum(_tree_bytes(Path(item), min_file_bytes=LARGE_FILE_REPORT_BYTES) for item in target.paths)
     if target.id == "thumbcache":
-        return sum(_tree_bytes(Path(item), name_glob="thumbcache_*.db") for item in target.paths)
+        # Execution only deletes the matching files directly in this folder.
+        return sum(_tree_bytes(Path(item), name_glob="thumbcache_*.db", recursive=False) for item in target.paths)
     age = min_age_days if target.id == "user_temp" else 0
     return sum(_tree_bytes(Path(item), min_age_days=age) for item in target.paths)
 

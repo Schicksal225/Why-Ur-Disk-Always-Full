@@ -41,6 +41,7 @@ def _export(tmp_path: Path, projects: list[dict], drives: list[dict] | None = No
         projects,
         drives if drives is not None else [{"drive": "C", "total_gb": 1, "used_gb": 1, "free_gb": 0, "x": 1}, {"drive": "D", "total_gb": 100, "used_gb": 40, "free_gb": 60, "x": 1}],
         dest_root=tmp_path / "out",
+        runner=lambda _command: "",
     )
     inventory = json.loads((folder / "inventory.json").read_text(encoding="utf-8"))
     return inventory, (folder / "REPORT.md").read_text(encoding="utf-8")
@@ -118,7 +119,7 @@ def test_handoff_shape_and_no_leaks(tmp_path: Path):
     assert set(inventory) == {"schema_version", "generated_at", "drives", "rules", "items", "rolled_up"}
     assert inventory["schema_version"] == 2
     assert len(inventory["rules"]) == 3
-    assert set(inventory["items"][0]) == {"path", "bytes", "kind", "project_path", "dirty", "restore"}
+    assert set(inventory["items"][0]) == {"path", "bytes", "kind", "project_path", "dirty", "tracked", "restore"}
     assert set(inventory["drives"][0]) == {"drive", "total_gb", "used_gb", "free_gb"}
     assert "must-not-leak" not in json.dumps(inventory) and "must-not-leak" not in report
     assert "D:\\w\\a\\node_modules" in report
@@ -153,3 +154,41 @@ def test_needs_rescan_flags_scans_from_before_rebuildable_paths():
     no_rebuildable = _project("D:\\w\\plain", [])
     del no_rebuildable["regenerable_dirs"]
     assert needs_rescan([no_rebuildable]) is False
+
+
+def test_subproject_without_own_git_inherits_parent_dirty(tmp_path: Path):
+    inner = _project("D:\\w\\mono\\pkg", [("D:\\w\\mono\\pkg\\node_modules", "node_modules", 200 * MIB)], dirty=None)
+    own = _project("D:\\w\\mono\\own", [("D:\\w\\mono\\own\\node_modules", "node_modules", 150 * MIB)], dirty=False)
+    parent = _project("D:\\w\\mono", [], dirty=True, subprojects=[inner, own])
+    inventory, _report = _export(tmp_path, [parent])
+    by_path = {item["path"]: item["dirty"] for item in inventory["items"]}
+    assert by_path["D:\\w\\mono\\pkg\\node_modules"] is True
+    assert by_path["D:\\w\\mono\\own\\node_modules"] is False
+
+
+def test_items_say_whether_git_tracks_the_directory(tmp_path: Path):
+    seen = []
+
+    def runner(command):
+        seen.append(command)
+        return "dist/app.js\n" if command[-1] == "dist" else ""
+
+    projects = [
+        _project(
+            "D:\\w\\a",
+            [("D:\\w\\a\\dist", "dist", 300 * MIB), ("D:\\w\\a\\node_modules", "node_modules", 200 * MIB)],
+        )
+    ]
+    folder = export_handoff(projects, [], dest_root=tmp_path / "out", runner=runner)
+    inventory = json.loads((folder / "inventory.json").read_text(encoding="utf-8"))
+    report = (folder / "REPORT.md").read_text(encoding="utf-8")
+    assert {item["kind"]: item["tracked"] for item in inventory["items"]} == {"dist": True, "node_modules": False}
+    assert seen[0][:4] == ["git", "-C", "D:\\w\\a", "ls-files"]
+    assert "已被 git 跟踪" in report
+
+
+def test_tracked_is_unknown_when_git_cannot_answer(tmp_path: Path):
+    projects = [_project("D:\\w\\a", [("D:\\w\\a\\dist", "dist", 300 * MIB)])]
+    folder = export_handoff(projects, [], dest_root=tmp_path / "out", runner=lambda _command: None)
+    inventory = json.loads((folder / "inventory.json").read_text(encoding="utf-8"))
+    assert inventory["items"][0]["tracked"] is None

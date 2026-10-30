@@ -1,16 +1,20 @@
 """Export a short list of rebuildable directories for another agent.
 
 Only projects on D: and E: are listed. Each entry is one directory (node_modules,
-target, ...) with its size, whether the project has uncommitted changes, and how
-to rebuild it. The list states facts; the agent decides what to delete.
+target, ...) with its size, whether the project has uncommitted changes, whether
+git tracks files inside it, and how to rebuild it. The list states facts; the
+agent decides what to delete.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from core.cleaner import format_bytes
 from core.paths import get_data_dir
@@ -22,22 +26,25 @@ MAX_ENTRIES = 30
 
 RULES = [
     "只处理本清单列出的目录，不动项目源码，不动清单以外的任何路径。",
-    "删除前确认路径仍然存在、目录名是清单里的种类。dirty 为 true 或 null 的项目，先看 git 状态再决定。",
+    "删除前确认路径仍然存在、目录名是清单里的种类。dirty 为 true 或 null 的项目先看 git 状态；tracked 为 true 说明目录里有被 git 跟踪的文件，不要删。",
     "删除后项目要先按 restore 恢复才能运行。本文件只有路径和元数据，没有文件内容。",
 ]
 
-_ENTRY_KEYS = ("path", "bytes", "kind", "project_path", "dirty", "restore")
+_ENTRY_KEYS = ("path", "bytes", "kind", "project_path", "dirty", "tracked", "restore")
 _DRIVE_KEYS = ("drive", "total_gb", "used_gb", "free_gb")
 
+GitRunner = Callable[[list[str]], "str | None"]
 
-def _on_export_drive(path: str) -> bool:
+
+def is_export_path(path: str) -> bool:
+    """True for a path on an exported drive (D: or E:)."""
     drive = os.path.splitdrive(str(path))[0]
     return drive[:1].upper() in EXPORT_DRIVES
 
 
 def export_scope_projects(projects: list[dict]) -> list[dict]:
     """Projects that live on an exported drive."""
-    return [item for item in projects if _on_export_drive(item.get("path", ""))]
+    return [item for item in projects if is_export_path(item.get("path", ""))]
 
 
 def needs_rescan(projects: list[dict]) -> bool:
@@ -80,13 +87,41 @@ def restore_command(project_path: str, kind: str) -> str:
     return "按项目说明重新生成"
 
 
+def _run_git(command: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _is_tracked(project_path: str, dir_path: str, runner: GitRunner) -> bool | None:
+    """True when git lists any file under the directory; None when git cannot say."""
+    try:
+        relative = os.path.relpath(dir_path, project_path)
+    except ValueError:
+        return None
+    output = runner(["git", "-C", project_path, "ls-files", "--", relative])
+    if not isinstance(output, str):
+        return None
+    return bool(output.strip())
+
+
 def _candidates(projects: list[dict]) -> list[dict]:
     found: list[dict] = []
-    stack = list(projects)
+    # A subproject inside a parent repo has no .git of its own; the parent's status covers it.
+    stack = [(project, None) for project in projects]
     while stack:
-        project = stack.pop()
-        stack.extend(project.get("subprojects") or [])
-        dirty = (project.get("git") or {}).get("dirty")
+        project, inherited = stack.pop()
+        own = (project.get("git") or {}).get("dirty")
+        dirty = own if own is not None else inherited
+        stack.extend((child, dirty) for child in project.get("subprojects") or [])
         for item in project.get("regenerable_dirs") or []:
             found.append(
                 {
@@ -101,12 +136,22 @@ def _candidates(projects: list[dict]) -> list[dict]:
     return found
 
 
-def build_handoff(projects: list[dict], drives: list[dict]) -> dict:
+def build_handoff(projects: list[dict], drives: list[dict], runner: GitRunner | None = None) -> dict:
     found = _candidates(export_scope_projects(projects))
     big = [entry for entry in found if entry["bytes"] >= MIN_ENTRY_BYTES]
     shown = big[:MAX_ENTRIES]
     rest = found[len(shown):]
-    items = [{**entry, "restore": restore_command(entry["project_path"], entry["kind"])} for entry in shown]
+    git = runner or _run_git
+
+    def complete(entry: dict) -> dict:
+        return {
+            **entry,
+            "tracked": _is_tracked(entry["project_path"], entry["path"], git),
+            "restore": restore_command(entry["project_path"], entry["kind"]),
+        }
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        items = list(pool.map(complete, shown))
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -121,17 +166,22 @@ def build_handoff(projects: list[dict], drives: list[dict]) -> dict:
     }
 
 
-def export_handoff(projects: list[dict], drives: list[dict], dest_root: Path | None = None) -> Path:
+def export_handoff(
+    projects: list[dict],
+    drives: list[dict],
+    dest_root: Path | None = None,
+    runner: GitRunner | None = None,
+) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     folder = (dest_root or (get_data_dir() / "exports")) / f"handoff-{stamp}"
     folder.mkdir(parents=True, exist_ok=True)
-    inventory = build_handoff(projects, drives)
+    inventory = build_handoff(projects, drives, runner)
     (folder / "inventory.json").write_text(json.dumps(inventory, ensure_ascii=False), encoding="utf-8")
     (folder / "REPORT.md").write_text(_render_report(inventory), encoding="utf-8")
     return folder
 
 
-def _dirty_text(value) -> str:
+def _flag_text(value) -> str:
     return "是" if value is True else "否" if value is False else "未知"
 
 
@@ -147,11 +197,12 @@ def _render_report(inventory: dict) -> str:
     if not items and not rolled["count"]:
         lines.append("这次盘查没有识别到可重建目录。")
     else:
-        lines.append("| 体积 | 路径 | 种类 | 未提交改动 | 恢复 |")
-        lines.append("| --- | --- | --- | --- | --- |")
+        lines.append("| 体积 | 路径 | 种类 | 未提交改动 | 已被 git 跟踪 | 恢复 |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
         for item in items:
             lines.append(
-                f"| {format_bytes(item['bytes'])} | `{item['path']}` | {item['kind']} | {_dirty_text(item['dirty'])} | {item['restore']} |"
+                f"| {format_bytes(item['bytes'])} | `{item['path']}` | {item['kind']} | "
+                f"{_flag_text(item['dirty'])} | {_flag_text(item['tracked'])} | {item['restore']} |"
             )
         if rolled["count"]:
             lines.extend(["", f"另有 {rolled['count']} 个更小的目录未列出，合计 {format_bytes(rolled['bytes'])}。"])

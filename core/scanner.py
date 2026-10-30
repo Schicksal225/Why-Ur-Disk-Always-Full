@@ -387,48 +387,70 @@ def _walk(
 
 
 def _sum_tree(path: str, state: _State) -> tuple[int, int]:
-    """Size and file count of a whole tree. Keeps only totals: no records, no nodes."""
-    if state.stop():
+    """Size and file count of a whole tree. Keeps only totals: no records, no nodes.
+
+    Uses an explicit stack, so a very deep tree cannot hit the recursion limit.
+    """
+    entries = _open_dir(path, state)
+    if entries is None:
         return 0, 0
+    # Each frame: [path, entry iterator, size, file count, files directly in this dir]
+    stack = [[path, iter(entries), 0, 0, 0]]
+    while True:
+        frame = stack[-1]
+        descended = False
+        for entry in frame[1]:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                state.skipped_errors += 1
+                continue
+            attrs = getattr(info, "st_file_attributes", 0)
+            if attrs & _ATTR_REPARSE:
+                state.skipped_reparse += 1
+                continue
+            if attrs & _ATTR_DIRECTORY or stat.S_ISDIR(info.st_mode):
+                child = _open_dir(entry.path, state)
+                if child is not None:
+                    stack.append([entry.path, iter(child), 0, 0, 0])
+                    descended = True
+                    break
+                continue
+            file_size = int(info.st_size)
+            frame[2] += file_size
+            frame[3] += 1
+            frame[4] += 1
+            category = EXT_CATEGORY.get(os.path.splitext(entry.name)[1].lower(), "其他")
+            state.categories[category] = state.categories.get(category, 0) + file_size
+        if descended:
+            continue
+        stack.pop()
+        done_path, _entries, size, file_count, own_files = frame
+        # Child directories added their own files already; add only this level's.
+        state.file_count += own_files
+        if os.path.basename(done_path).lower() in state._watch_names:
+            _note_special(done_path, size, None, state)
+        if not stack:
+            return size, file_count
+        stack[-1][2] += size
+        stack[-1][3] += file_count
+
+
+def _open_dir(path: str, state: _State) -> list | None:
+    """Entries of a directory for `_sum_tree`, or None when it cannot be read."""
+    if state.stop():
+        return None
     try:
         with os.scandir(path) as handle:
             entries = list(handle)
     except OSError:
         state.skipped_errors += 1
-        return 0, 0
+        return None
     state.dir_count += 1
     state._sum_dirs += 1
     if state.progress and state._sum_dirs % 200 == 0:
         state.progress(f"正在盘查 {path}")
-    size = 0
-    file_count = 0
-    own_files = 0
-    for entry in entries:
-        try:
-            info = entry.stat(follow_symlinks=False)
-        except OSError:
-            state.skipped_errors += 1
-            continue
-        attrs = getattr(info, "st_file_attributes", 0)
-        if attrs & _ATTR_REPARSE:
-            state.skipped_reparse += 1
-            continue
-        if attrs & _ATTR_DIRECTORY or stat.S_ISDIR(info.st_mode):
-            child_size, child_files = _sum_tree(entry.path, state)
-            size += child_size
-            file_count += child_files
-            continue
-        file_size = int(info.st_size)
-        size += file_size
-        file_count += 1
-        own_files += 1
-        category = EXT_CATEGORY.get(os.path.splitext(entry.name)[1].lower(), "其他")
-        state.categories[category] = state.categories.get(category, 0) + file_size
-    # Children already added their own files to the global count; add only this level's.
-    state.file_count += own_files
-    if os.path.basename(path).lower() in state._watch_names:
-        _note_special(path, size, None, state)
-    return size, file_count
+    return entries
 
 
 def _note_special(path: str, size: int, chat_label: str | None, state: _State) -> None:

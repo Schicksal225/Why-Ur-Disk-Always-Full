@@ -65,3 +65,31 @@ def test_shortcut_script_uses_wscript():
     assert "WScript.Shell" in script
     assert "PCOptimizer.exe" in script
     assert "IconLocation" in script
+
+
+def _bare_api() -> Api:
+    api = Api.__new__(Api)
+    api._store = None
+    api._jobs = None
+    api._window = None
+    api._results = []
+    api._findings = []
+    api._projects = []
+    api._advice = []
+    api._categories = {}
+    api._cache_targets = []
+    return api
+
+
+def test_export_asks_for_a_scan_only_when_d_and_e_were_not_scanned(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("app.api.get_disk_usage", lambda: [])
+    monkeypatch.setattr("app.api.os.startfile", lambda _path: None, raising=False)
+    monkeypatch.setattr("app.api.export_handoff", lambda projects, drives: tmp_path)
+    api = _bare_api()
+    assert api.export_handoff() == {"ok": False, "error": "请先盘查 D 盘或 E 盘"}
+    api._results = [SimpleNamespace(root="C:\\")]
+    assert api.export_handoff()["ok"] is False
+    api._results = [SimpleNamespace(root="D:\\")]
+    assert api.export_handoff()["ok"] is True

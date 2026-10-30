@@ -140,3 +140,24 @@ def test_file_count_matches_files_on_disk(tmp_path: Path):
     assert result.file_count == expected
     modules = next(c for c in next(n for n in result.tree.children if n.name == "app").children if c.name == "node_modules")
     assert modules.file_count == 3
+
+
+def test_sum_tree_does_not_recurse_once_per_directory(tmp_path: Path):
+    import inspect
+    import sys
+
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "package.json").write_text("{}", encoding="utf-8")
+    deep = app / "node_modules"
+    for _ in range(60):
+        deep = deep / "d"
+    deep.mkdir(parents=True)
+    (deep / "leaf.js").write_text("x", encoding="utf-8")
+    old_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(len(inspect.stack(0)) + 40)
+    try:
+        result = scan_path(tmp_path, store_depth=3)
+    finally:
+        sys.setrecursionlimit(old_limit)
+    assert result.file_count == 2

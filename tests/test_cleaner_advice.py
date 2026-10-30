@@ -81,3 +81,12 @@ def test_thumbcache_counts_only_matching_files(tmp_path: Path):
     (explorer / "iconcache_16.db").write_bytes(b"i" * 500)
     target = CleanTarget(id="thumbcache", label="thumb", level="safe", paths=[str(explorer)])
     assert scan_target(target, []) == 300
+
+
+def test_thumbcache_measure_ignores_nested_folders(tmp_path: Path):
+    explorer = tmp_path / "Explorer"
+    (explorer / "old").mkdir(parents=True)
+    (explorer / "thumbcache_256.db").write_bytes(b"t" * 300)
+    (explorer / "old" / "thumbcache_32.db").write_bytes(b"n" * 900)
+    target = CleanTarget(id="thumbcache", label="thumb", level="safe", paths=[str(explorer)])
+    assert scan_target(target, []) == 300

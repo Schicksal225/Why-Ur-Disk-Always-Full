@@ -312,11 +312,16 @@ function renderProjects() {
   $("project-detail").innerHTML = chosen ? projectDetail(chosen) : empty("选择一个项目", "左侧点一个项目查看细节。");
 }
 
+// Rebuildable directories of a project and of every sub-project inside it.
+function allRegenDirs(project) {
+  return (project.regenerable_dirs || []).concat(...(project.subprojects || []).map(allRegenDirs));
+}
+
 function projectDetail(project) {
   const git = project.git || {};
   const dirty = git.dirty === true ? "有未提交改动" : git.dirty === false ? "干净" : "未知";
   const regenRows = Object.entries(project.regenerable || {}).sort((a, b) => b[1] - a[1]);
-  const regenDirs = (project.regenerable_dirs || []).slice().sort((a, b) => b.bytes - a.bytes);
+  const regenDirs = allRegenDirs(project).sort((a, b) => b.bytes - a.bytes);
   const subs = project.subprojects || [];
   return `<div class="card-head"><h2>${esc(project.name)}</h2><span class="badge ${esc(project.risk)}">${esc(RISK_TEXT[project.risk] || project.risk)}</span></div>
     <p class="muted">${esc(project.risk_note)}</p>
@@ -402,7 +407,12 @@ window.onProgress = (payload) => {
   if (!payload.ok) { toast("出错：" + (payload.error || "未知错误")); return; }
   const result = payload.result || {};
   if (payload.job === "scan") { state.treePath = []; hydrate().then(() => toast(`盘查完成：${result.findings ?? 0} 条发现，${result.projects ?? 0} 个项目`)); }
-  if (payload.job === "cache") api().get_cache_targets().then((data) => { state.caches = data.targets || []; renderCaches(); });
+  if (payload.job === "cache") api().get_cache_targets().then((data) => {
+    // The first batch may already be on screen; keep any box the user has toggled since.
+    const chosen = new Map(state.caches.map((item) => [item.id, item.selected]));
+    state.caches = (data.targets || []).map((item) => (chosen.has(item.id) && item.level === "safe" ? { ...item, selected: chosen.get(item.id) } : item));
+    renderCaches();
+  });
   if (payload.job === "clean") { toast(`缓存清理完成，释放约 ${result.freed}`); startCacheScan(); refreshDisks(); }
   if (payload.job === "execute") {
     toast(`处理完成：成功 ${result.ok_count ?? 0} 项，跳过 ${result.fail_count ?? 0} 项，释放约 ${result.freed}`);
