@@ -164,7 +164,8 @@ main { padding: 28px 32px 40px; max-width: 1320px; width: 100%; }
 .detail-grid dt { color: var(--ink-3); }
 .detail-grid dd { margin: 0; word-break: break-all; }
 .regen-list { list-style: none; padding: 0; margin: 8px 0 0; }
-.regen-list li { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; }
+.regen-list li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; }
+.regen-list .path { min-width: 0; word-break: break-all; font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; }
 
 .export-ok { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 16px; border-radius: var(--radius); background: var(--ok-soft); color: var(--ok); margin-bottom: 4px; }
 .export-ok code { color: var(--ink); font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; word-break: break-all; }

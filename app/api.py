@@ -15,7 +15,7 @@ from core.cleaner import build_targets, execute_target, format_bytes, get_disk_u
 from core.classifier import classify_scan, findings_from_duplicates
 from core.duplicates import find_duplicates
 from core.executor import execute_findings
-from core.handoff import export_handoff
+from core.handoff import export_handoff, export_scope_projects
 from core.perf import collect_system_snapshot, generate_memory_advice, generate_suggestions, kill_processes
 from core.projects import finalize_projects
 from core.scanner import load_audit_cache, result_from_dict, result_to_dict, save_audit_cache, scan_path
@@ -163,9 +163,9 @@ class Api:
         return self._jobs.start("clean", work)
 
     def export_handoff(self) -> dict:
-        if not self._projects and not self._findings:
-            return {"ok": False, "error": "请先盘查，再导出"}
-        folder = export_handoff(self._projects, self._findings, get_disk_usage())
+        if not export_scope_projects(self._projects):
+            return {"ok": False, "error": "请先盘查 D 盘或 E 盘"}
+        folder = export_handoff(self._projects, get_disk_usage())
         try:
             os.startfile(folder)  # type: ignore[attr-defined]
         except OSError:

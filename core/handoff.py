@@ -1,107 +1,144 @@
-"""Export a Markdown report and a JSON inventory for another agent."""
+"""Export a short list of rebuildable directories for another agent.
+
+Only projects on D: and E: are listed. Each entry is one directory (node_modules,
+target, ...) with its size, whether the project has uncommitted changes, and how
+to rebuild it. The list states facts; the agent decides what to delete.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 from core.cleaner import format_bytes
 from core.paths import get_data_dir
-from core.safety import _system_prefixes
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+EXPORT_DRIVES = ("D", "E")
+MIN_ENTRY_BYTES = 100 * 1024 * 1024
+MAX_ENTRIES = 30
 
-_RULES = """# 给接手 agent 的操作规则
+RULES = [
+    "只处理本清单列出的目录，不动项目源码，不动清单以外的任何路径。",
+    "删除前确认路径仍然存在、目录名是清单里的种类。dirty 为 true 或 null 的项目，先看 git 状态再决定。",
+    "删除后项目要先按 restore 恢复才能运行。本文件只有路径和元数据，没有文件内容。",
+]
 
-1. 不得删除硬拒绝路径：Windows、Program Files、ProgramData、各盘根目录、System Volume Information、$Recycle.Bin、Recovery、Boot、pagefile.sys、hiberfil.sys、swapfile.sys，以及 junction / 符号链接。
-2. 删除前重新核对路径仍然存在、大小没有明显变化，并再看一遍 git 状态。
-3. 优先处理 `regenerable` 里的可再生目录（如 node_modules、target、dist）。不要删除项目源码。
-4. 删除整个项目之前必须先问用户。
-5. 删除用户文件时优先移入回收站，不要直接永久删除。
-6. 本文件只包含路径和元数据，不包含任何文件内容。
-"""
+_ENTRY_KEYS = ("path", "bytes", "kind", "project_path", "dirty", "restore")
+_DRIVE_KEYS = ("drive", "total_gb", "used_gb", "free_gb")
 
 
-def safety_rules() -> dict:
+def _on_export_drive(path: str) -> bool:
+    drive = os.path.splitdrive(str(path))[0]
+    return drive[:1].upper() in EXPORT_DRIVES
+
+
+def export_scope_projects(projects: list[dict]) -> list[dict]:
+    """Projects that live on an exported drive."""
+    return [item for item in projects if _on_export_drive(item.get("path", ""))]
+
+
+def restore_command(project_path: str, kind: str) -> str:
+    root = Path(project_path)
+    if kind == "node_modules":
+        if (root / "pnpm-lock.yaml").is_file():
+            return "在项目根目录执行 pnpm install"
+        if (root / "yarn.lock").is_file():
+            return "在项目根目录执行 yarn install"
+        if (root / "package-lock.json").is_file() or (root / "npm-shrinkwrap.json").is_file():
+            return "在项目根目录执行 npm ci"
+        return "在项目根目录执行 npm install"
+    if kind in (".venv", "venv"):
+        return "按项目说明重建虚拟环境"
+    if kind == "target":
+        return "在项目根目录执行 cargo build"
+    if kind in ("dist", "build", ".next"):
+        return "按该项目的构建命令重新生成"
+    if kind == "__pycache__":
+        return "Python 会自动重新生成"
+    if kind == ".gradle":
+        return "在项目根目录执行 gradle build"
+    if kind in ("bin", "obj"):
+        return "在项目根目录执行 dotnet build"
+    return "按项目说明重新生成"
+
+
+def _candidates(projects: list[dict]) -> list[dict]:
+    found: list[dict] = []
+    stack = list(projects)
+    while stack:
+        project = stack.pop()
+        stack.extend(project.get("subprojects") or [])
+        dirty = (project.get("git") or {}).get("dirty")
+        for item in project.get("regenerable_dirs") or []:
+            found.append(
+                {
+                    "path": item["path"],
+                    "bytes": int(item.get("bytes") or 0),
+                    "kind": item["kind"],
+                    "project_path": project["path"],
+                    "dirty": dirty,
+                }
+            )
+    found.sort(key=lambda entry: entry["bytes"], reverse=True)
+    return found
+
+
+def build_handoff(projects: list[dict], drives: list[dict]) -> dict:
+    found = _candidates(export_scope_projects(projects))
+    big = [entry for entry in found if entry["bytes"] >= MIN_ENTRY_BYTES]
+    shown = big[:MAX_ENTRIES]
+    rest = found[len(shown):]
+    items = [{**entry, "restore": restore_command(entry["project_path"], entry["kind"])} for entry in shown]
     return {
-        "never_delete_prefixes": [str(path) for path in _system_prefixes()],
-        "never_delete_root_dirs": ["System Volume Information", "$Recycle.Bin", "Recovery", "Boot"],
-        "never_delete_files": ["pagefile.sys", "hiberfil.sys", "swapfile.sys"],
-        "notes": [
-            "重新解析点（junction、symlink）不能删除，扫描时也不跟随。",
-            "带系统属性的文件不能删除。",
-            "项目源码不能由清理工具直接删除；可再生目录见每个项目的 regenerable 字段。",
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "drives": [
+            {key: drive.get(key) for key in _DRIVE_KEYS}
+            for drive in drives
+            if str(drive.get("drive", "")).upper() in EXPORT_DRIVES
         ],
+        "rules": list(RULES),
+        "items": [{key: entry[key] for key in _ENTRY_KEYS} for entry in items],
+        "rolled_up": {"count": len(rest), "bytes": sum(entry["bytes"] for entry in rest)},
     }
 
 
-def export_handoff(
-    projects: list[dict],
-    findings: list[dict],
-    drives: list[dict],
-    dest_root: Path | None = None,
-) -> Path:
+def export_handoff(projects: list[dict], drives: list[dict], dest_root: Path | None = None) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     folder = (dest_root or (get_data_dir() / "exports")) / f"handoff-{stamp}"
     folder.mkdir(parents=True, exist_ok=True)
-    inventory = {
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "drives": drives,
-        "safety_rules": safety_rules(),
-        "projects": projects,
-        "findings": [_public_finding(item) for item in findings],
-    }
-    (folder / "inventory.json").write_text(
-        json.dumps(inventory, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    inventory = build_handoff(projects, drives)
+    (folder / "inventory.json").write_text(json.dumps(inventory, ensure_ascii=False), encoding="utf-8")
     (folder / "REPORT.md").write_text(_render_report(inventory), encoding="utf-8")
     return folder
 
 
-def _public_finding(item: dict) -> dict:
-    keys = ("path", "label", "category", "action", "risk", "size", "reason", "suggestion")
-    return {key: item.get(key) for key in keys}
+def _dirty_text(value) -> str:
+    return "是" if value is True else "否" if value is False else "未知"
 
 
 def _render_report(inventory: dict) -> str:
-    lines = [_RULES.rstrip(), "", "## 磁盘", ""]
+    lines = ["# 给接手 agent 的目录清单", ""]
+    lines.extend(f"{number}. {rule}" for number, rule in enumerate(inventory["rules"], start=1))
+    lines.extend(["", "## 磁盘", ""])
     for drive in inventory["drives"]:
-        lines.append(
-            f"- {drive.get('drive')}: 已用 {drive.get('used_gb')} / {drive.get('total_gb')} GB，剩余 {drive.get('free_gb')} GB"
-        )
-    lines.extend(["", "## 项目（按可再生空间从大到小）", ""])
-    ordered = sorted(inventory["projects"], key=lambda item: sum((item.get("regenerable") or {}).values()), reverse=True)
-    if not ordered:
-        lines.append("这次盘查没有识别到项目目录。")
-    for project in ordered:
-        lines.extend(_project_section(project, 3))
-    lines.extend(["", "## JSON 字段", ""])
-    lines.append("- `projects[].regenerable`：目录名到字节数，这些目录可以重建。")
-    lines.append("- `projects[].git.dirty`：true 表示有未提交改动；null 表示没能运行 git。")
-    lines.append("- `projects[].risk`：high 时不要删除该项目。")
-    lines.append("- `findings[].action`：`cache_clean` 可直接清理，`recycle_suggest` 应进回收站，`advice_only` 和 `readonly` 不要执行。")
+        lines.append(f"- {drive.get('drive')}: 已用 {drive.get('used_gb')} / {drive.get('total_gb')} GB，剩余 {drive.get('free_gb')} GB")
+    lines.extend(["", "## 项目里的可重建目录（按体积从大到小）", ""])
+    items = inventory["items"]
+    rolled = inventory["rolled_up"]
+    if not items and not rolled["count"]:
+        lines.append("这次盘查没有识别到可重建目录。")
+    else:
+        lines.append("| 体积 | 路径 | 种类 | 未提交改动 | 恢复 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for item in items:
+            lines.append(
+                f"| {format_bytes(item['bytes'])} | `{item['path']}` | {item['kind']} | {_dirty_text(item['dirty'])} | {item['restore']} |"
+            )
+        if rolled["count"]:
+            lines.extend(["", f"另有 {rolled['count']} 个更小的目录未列出，合计 {format_bytes(rolled['bytes'])}。"])
     lines.append("")
     return "\n".join(lines)
-
-
-def _project_section(project: dict, level: int) -> list[str]:
-    regenerable = project.get("regenerable") or {}
-    regen_bytes = sum(regenerable.values())
-    git = project.get("git") or {}
-    title = "#" * level
-    lines = [
-        f"{title} {project.get('name')} ({project.get('project_type')})",
-        "",
-        f"- 路径：`{project.get('path')}`",
-        f"- 大小：{format_bytes(int(project.get('size') or 0))}，文件 {project.get('file_count') or 0} 个",
-        f"- 可再生：{format_bytes(regen_bytes)}" + (f"（{', '.join(f'{name} {format_bytes(size)}' for name, size in regenerable.items())}）" if regenerable else ""),
-        f"- Git：remote={git.get('remote') or '无'}，最近提交={git.get('last_commit') or '未知'}，未提交={'是' if git.get('dirty') else '否' if git.get('dirty') is False else '未知'}",
-        f"- 风险：{project.get('risk')}。{project.get('risk_note')}",
-        "",
-    ]
-    for child in project.get("subprojects") or []:
-        lines.extend(_project_section(child, min(level + 1, 6)))
-    return lines

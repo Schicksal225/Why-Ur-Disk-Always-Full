@@ -38,7 +38,7 @@ Every path is re-checked right before execution; earlier scan results are not tr
 
 ## Hand-off to an AI agent
 
-"Projects" page, "Export for AI" writes `exports/handoff-<time>/REPORT.md` and `inventory.json`: paths, types, sizes, rebuildable folders, git state and risk notes. No file contents, no delete scripts.
+"Projects" page, "Export for AI" writes `exports/handoff-<time>/REPORT.md` and `inventory.json`. It lists the rebuildable folders (`node_modules`, `target`, ...) of projects on drives D and E, largest first, at most 30 entries of 100 MB or more. Each entry has the full path, size, whether the project has uncommitted changes, and the command that rebuilds it; smaller ones are rolled into one total. The list states facts only, the agent decides what to delete. No file contents, no delete scripts.
 
 ## Run from source
 

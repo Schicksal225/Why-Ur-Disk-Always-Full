@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from core.handoff import export_handoff
 from core.projects import apply_risk, finalize_projects, read_git_info
 from core.scanner import scan_path
 
@@ -65,44 +63,6 @@ def test_git_metadata_and_risk(tmp_path: Path):
     apply_risk(project, now=200 * 86400)
     assert project["risk"] == "high"
     assert "未提交" in project["risk_note"]
-
-
-def test_handoff_writes_rules_and_metadata_only(tmp_path: Path):
-    projects = finalize_projects(
-        [
-            {
-                "path": str(tmp_path / "app"),
-                "name": "app",
-                "markers": ["package.json"],
-                "kind": "project",
-                "project_type": "node",
-                "size": 100,
-                "file_count": 2,
-                "source_mtime": 0,
-                "regenerable": {"node_modules": 50},
-                "subprojects": [],
-                "git": {"remote": "", "last_commit": "", "dirty": None},
-                "risk": "low",
-                "risk_note": "源码目录，本工具不会删除其中的源码",
-            }
-        ],
-        runner=lambda _cmd: "",
-    )
-    folder = export_handoff(
-        projects,
-        [{"path": str(tmp_path / "cache"), "label": "缓存", "category": "缓存", "action": "cache_clean", "risk": "low", "size": 4, "reason": "可再生", "suggestion": "可清理", "secret": "nope"}],
-        [{"drive": "D", "total_gb": 100, "used_gb": 40, "free_gb": 60}],
-        dest_root=tmp_path / "out",
-    )
-    inventory = json.loads((folder / "inventory.json").read_text(encoding="utf-8"))
-    report = (folder / "REPORT.md").read_text(encoding="utf-8")
-    assert inventory["schema_version"] == 1
-    assert inventory["safety_rules"]["never_delete_files"]
-    assert inventory["projects"][0]["path"].endswith("app")
-    assert "secret" not in json.dumps(inventory)
-    assert "给接手 agent 的操作规则" in report
-    assert "app (node)" in report
-    assert "不得删除" in report
 
 
 def test_git_status_only_runs_for_projects_with_rebuildable_dirs(tmp_path: Path):

@@ -105,7 +105,7 @@
 
       <section id="projects" class="page hidden">
         <header class="page-head">
-          <div><h1>项目</h1><p class="muted">按项目拆开硬盘。导出给 AI 后，由 Cursor 或其他 agent 判断哪些能删。</p></div>
+          <div><h1>项目</h1><p class="muted">按项目里 node_modules、target 这类可重建目录的占用从大到小排列。这些目录删掉后源码还在，但重新安装或编译之前项目无法运行；排名只表示谁更占空间，不表示整个项目可删。导出给 AI 的清单只含 D、E 盘的项目。</p></div>
           <button id="export-btn" class="primary"><svg><use href="#i-export"/></svg>导出给 AI</button>
         </header>
         <div id="export-result"></div>
@@ -114,13 +114,13 @@
             <div class="card-head">
               <h2>项目列表</h2>
               <select id="project-sort" aria-label="排序方式">
-                <option value="regen">按可再生空间</option>
+                <option value="regen">按可重建目录占用</option>
                 <option value="size">按总大小</option>
                 <option value="idle">按闲置天数</option>
               </select>
             </div>
             <ul id="project-list" class="project-list"></ul>
-            <p class="hint">条形图深色是源码等其他内容，浅色是 node_modules、target 这类可以重建的目录。</p>
+            <p class="hint">条形图深色是源码等其他内容，浅色是可重建目录。</p>
           </article>
           <article class="card" id="project-detail"></article>
         </div>

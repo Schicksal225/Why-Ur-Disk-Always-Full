@@ -77,7 +77,7 @@ function renderOverview() {
   const steps = [
     { done: state.scanned, title: "盘查", body: "到「存储盘查」选盘符，看每个盘存了什么。" },
     { done: state.findings.some((item) => item.selectable && item.selected) || false, title: "勾选处理", body: "缓存直接清理，安装包和重复文件进回收站。" },
-    { done: state.exported, title: "交给 AI", body: "在「项目」导出报告，让 agent 判断项目里的可删目录。" },
+    { done: state.exported, title: "交给 AI", body: "在「项目」导出 D、E 盘项目里的可重建目录清单，让 agent 核对后处理。" },
   ];
   $("guide").innerHTML = steps.map((step, index) => `
     <div class="step ${step.done ? "done" : ""}"><b>${step.done ? "✓" : index + 1}</b><div><strong>${esc(step.title)}</strong><span>${esc(step.body)}</span></div></div>`).join("");
@@ -146,8 +146,11 @@ function renderDrivePicks() {
   const box = $("drive-picks");
   const checked = new Set([...box.querySelectorAll("input:checked")].map((node) => node.value));
   const initial = !box.childElementCount;
+  // First time: D and E (what the AI hand-off covers); C only when neither exists.
+  const dataDrives = state.disks.filter((disk) => disk.drive === "D" || disk.drive === "E").map((disk) => disk.drive);
+  const defaults = new Set(dataDrives.length ? dataDrives : ["C"]);
   box.innerHTML = state.disks.map((disk) => {
-    const on = initial ? disk.drive === "C" : checked.has(disk.drive);
+    const on = initial ? defaults.has(disk.drive) : checked.has(disk.drive);
     return `<label class="chip"><input type="checkbox" value="${esc(disk.drive)}" ${on ? "checked" : ""}/><span>${esc(disk.drive)}: 盘</span></label>`;
   }).join("");
 }
@@ -296,7 +299,7 @@ function renderProjects() {
     return `<li class="project ${state.selectedProject === project.path ? "active" : ""}" data-index="${index}" tabindex="0">
       <div><strong>${esc(project.name)}</strong> <span class="badge ${esc(project.risk)}">${esc(RISK_TEXT[project.risk] || project.risk)}</span></div>
       <span class="size">${bytes(project.size)}</span>
-      <div class="meta">${esc(PROJECT_TYPE[project.project_type] || project.project_type)} · 可再生 ${bytes(regen(project))}${idle !== null ? ` · ${idle} 天未改` : ""}</div>
+      <div class="meta">${esc(PROJECT_TYPE[project.project_type] || project.project_type)} · 可重建目录 ${bytes(regen(project))}${idle !== null ? ` · ${idle} 天未改` : ""}</div>
       <div class="split-meter" aria-hidden="true"><i style="width:${100 - share}%"></i><i class="regen" style="width:${share}%"></i></div>
     </li>`;
   }).join("") : empty(state.scanned ? "没有识别到项目" : "还没有盘查", state.scanned ? "含 package.json、pyproject.toml、.sln 或 .git 的文件夹会算作项目。" : "先到「存储盘查」盘查一次。");
@@ -313,6 +316,7 @@ function projectDetail(project) {
   const git = project.git || {};
   const dirty = git.dirty === true ? "有未提交改动" : git.dirty === false ? "干净" : "未知";
   const regenRows = Object.entries(project.regenerable || {}).sort((a, b) => b[1] - a[1]);
+  const regenDirs = (project.regenerable_dirs || []).slice().sort((a, b) => b.bytes - a.bytes);
   const subs = project.subprojects || [];
   return `<div class="card-head"><h2>${esc(project.name)}</h2><span class="badge ${esc(project.risk)}">${esc(RISK_TEXT[project.risk] || project.risk)}</span></div>
     <p class="muted">${esc(project.risk_note)}</p>
@@ -324,8 +328,12 @@ function projectDetail(project) {
       <dt>最近提交</dt><dd>${esc(git.last_commit || "未知")}</dd>
       <dt>工作区</dt><dd>${esc(dirty)}</dd>
     </dl>
-    <h2>可再生目录</h2>
-    ${regenRows.length ? `<ul class="regen-list">${regenRows.map(([name, size]) => `<li><span>${esc(name)}</span><span class="size">${bytes(size)}</span></li>`).join("")}</ul>` : `<p class="muted">没有发现 node_modules、dist 这类可以重建的目录。</p>`}
+    <h2>可重建目录</h2>
+    ${regenDirs.length
+      ? `<ul class="regen-list">${regenDirs.map((item) => `<li><span class="path">${esc(item.path)}</span><span class="size">${bytes(item.bytes)}</span></li>`).join("")}</ul>`
+      : regenRows.length
+        ? `<ul class="regen-list">${regenRows.map(([name, size]) => `<li><span>${esc(name)}</span><span class="size">${bytes(size)}</span></li>`).join("")}</ul>`
+        : `<p class="muted">没有发现 node_modules、dist 这类可以重建的目录。</p>`}
     ${subs.length ? `<h2 class="gap">子项目 ${subs.length} 个</h2><ul class="regen-list">${subs.map((sub) => `<li><span>${esc(sub.name)}</span><span class="size">${bytes(sub.size)}</span></li>`).join("")}</ul>` : ""}`;
 }
 
