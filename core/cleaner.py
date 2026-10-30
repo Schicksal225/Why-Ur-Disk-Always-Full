@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import shutil
 import subprocess
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable
 
 from core.paths import get_user_local_appdata, get_user_profile, get_user_roaming_appdata, is_frozen
-from core.safety import is_path_protected, is_reparse_point, is_safe_delete_target
+from core.safety import is_path_protected, is_safe_delete_target
 
 ProgressCallback = Callable[[str], None]
 
@@ -39,45 +42,69 @@ class CleanResult:
     errors: list[str] = field(default_factory=list)
 
 
-def _dir_size(path: Path, protected_paths: Iterable[str], min_age_days: int = 0) -> int:
-    total = 0
-    if not path.exists():
-        return 0
+_ATTR_DIRECTORY = 0x10
+_ATTR_REPARSE = 0x400
+# Same names the delete gate never enters; measuring skips them too.
+_SKIP_DIR_NAMES = frozenset({"node_modules", ".git", ".pnpm-store", "dockerdata"})
+LARGE_FILE_REPORT_BYTES = 50 * 1024 * 1024
+
+
+def _tree_bytes(
+    path: Path,
+    *,
+    min_age_days: int = 0,
+    min_file_bytes: int = 0,
+    name_glob: str | None = None,
+    skip_names: frozenset[str] = _SKIP_DIR_NAMES,
+) -> int:
+    """Read-only size of a tree by plain directory enumeration.
+
+    Deleting re-checks every path with the safety gate, so measuring does not:
+    it only skips reparse points and the named directories. The number is an
+    upper bound of what a cleanup can free.
+    """
+    root = str(path)
     try:
-        if path.is_file():
-            if not is_safe_delete_target(path, protected_paths):
-                return 0
-            if min_age_days and not _file_age_ok(path, min_age_days):
-                return 0
-            return path.stat().st_size
-        for root, dirs, files in os.walk(path, topdown=True):
-            root_path = Path(root)
-            dirs[:] = [
-                d
-                for d in dirs
-                if not is_path_protected(root_path / d, protected_paths)
-            ]
-            for name in files:
-                fp = root_path / name
-                if not is_safe_delete_target(fp, protected_paths):
-                    continue
-                if min_age_days and not _file_age_ok(fp, min_age_days):
-                    continue
-                try:
-                    total += fp.stat().st_size
-                except OSError:
-                    pass
+        root_info = os.lstat(root)
     except OSError:
-        pass
-    return total
-
-
-def _glob_dir_size(pattern_root: Path, glob_pattern: str, protected_paths: Iterable[str], min_age_days: int = 0) -> int:
-    total = 0
-    if not pattern_root.exists():
         return 0
-    for fp in pattern_root.glob(glob_pattern):
-        total += _dir_size(fp, protected_paths, min_age_days=min_age_days)
+    if getattr(root_info, "st_file_attributes", 0) & _ATTR_REPARSE:
+        return 0
+    cutoff = time.time() - min_age_days * 86400 if min_age_days else None
+    total = 0
+
+    def counts(name: str, info: os.stat_result) -> bool:
+        if name_glob and not fnmatch.fnmatch(name.lower(), name_glob.lower()):
+            return False
+        if min_file_bytes and info.st_size < min_file_bytes:
+            return False
+        if cutoff is not None and info.st_mtime >= cutoff:
+            return False
+        return True
+
+    if not (getattr(root_info, "st_file_attributes", 0) & _ATTR_DIRECTORY):
+        return int(root_info.st_size) if counts(os.path.basename(root), root_info) else 0
+
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    attrs = getattr(info, "st_file_attributes", 0)
+                    if attrs & _ATTR_REPARSE:
+                        continue
+                    if attrs & _ATTR_DIRECTORY:
+                        if entry.name.lower() not in skip_names:
+                            stack.append(entry.path)
+                    elif counts(entry.name, info):
+                        total += int(info.st_size)
+        except OSError:
+            continue
     return total
 
 
@@ -216,56 +243,23 @@ def build_targets(protected_paths: Iterable[str] | None = None) -> list[CleanTar
 
 
 def measure_tree_bytes(path: Path) -> int:
-    """Read-only size. Skips reparse points and does not apply the delete whitelist."""
-    total = 0
-    if not path.exists() or is_reparse_point(path):
-        return 0
-    try:
-        if path.is_file():
-            return path.stat().st_size
-        for root, dirs, files in os.walk(path, topdown=True):
-            root_path = Path(root)
-            dirs[:] = [name for name in dirs if not is_reparse_point(root_path / name)]
-            for name in files:
-                fp = root_path / name
-                if is_reparse_point(fp):
-                    continue
-                try:
-                    total += fp.stat().st_size
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return total
+    """Read-only size of a system location. Skips reparse points only."""
+    return _tree_bytes(path, skip_names=frozenset())
 
 
 def scan_target(target: CleanTarget, protected_paths: Iterable[str], min_age_days: int = 0) -> int:
-    if target.level == "advice":
-        total = 0
-        for item in target.paths:
-            total += measure_tree_bytes(Path(item))
-        return total
-    use_age = target.id == "user_temp"
-    age = min_age_days if use_age else 0
-
+    """Measure how much a target could free. `protected_paths` is not consulted:
+    execution re-checks every path, so this number is an upper bound."""
     if target.command == "recycle_bin":
         return _estimate_recycle_bin()
-    if target.command in ("pip_cache", "npm_cache", "conda_cache"):
-        size = 0
-        for p in target.paths:
-            size += _dir_size(Path(p), protected_paths, min_age_days=0)
-        return size
-    if target.id == "thumbcache":
-        root = Path(target.paths[0]) if target.paths else None
-        if root and root.exists():
-            return _glob_dir_size(root, "thumbcache_*.db", protected_paths)
-        return 0
+    if target.level == "advice":
+        return sum(measure_tree_bytes(Path(item)) for item in target.paths)
     if target.id == "downloads_report":
-        return _scan_large_files_report(target.paths[0] if target.paths else "", protected_paths)
-    total = 0
-    for p in target.paths:
-        total += _dir_size(Path(p), protected_paths, min_age_days=age)
-    return total
+        return sum(_tree_bytes(Path(item), min_file_bytes=LARGE_FILE_REPORT_BYTES) for item in target.paths)
+    if target.id == "thumbcache":
+        return sum(_tree_bytes(Path(item), name_glob="thumbcache_*.db") for item in target.paths)
+    age = min_age_days if target.id == "user_temp" else 0
+    return sum(_tree_bytes(Path(item), min_age_days=age) for item in target.paths)
 
 
 def scan_all(
@@ -273,13 +267,26 @@ def scan_all(
     protected_paths: Iterable[str],
     progress: ProgressCallback | None = None,
     min_age_days: int = 1,
+    on_batch: Callable[[list[CleanTarget]], None] | None = None,
 ) -> list[CleanTarget]:
-    for t in targets:
+    """Measure every target. Cleanable ones go first and are reported through
+    `on_batch` as soon as they are done, before the advice-only ones start."""
+
+    def measure(target: CleanTarget) -> None:
         if progress:
-            progress(f"扫描: {t.label}")
-        t.reclaimable_bytes = scan_target(t, protected_paths, min_age_days=min_age_days)
-        if t.level == "safe":
-            t.selected = True
+            progress(f"扫描: {target.label}")
+        target.reclaimable_bytes = scan_target(target, protected_paths, min_age_days=min_age_days)
+        if target.level == "safe":
+            target.selected = True
+
+    safe = [item for item in targets if item.level == "safe"]
+    rest = [item for item in targets if item.level != "safe"]
+    for group in (safe, rest):
+        if group:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(measure, group))
+        if group is safe and on_batch:
+            on_batch(safe)
     return targets
 
 
@@ -303,27 +310,6 @@ def _estimate_recycle_bin() -> int:
     except Exception:
         pass
     return 0
-
-
-def _scan_large_files_report(downloads: str, protected_paths: Iterable[str], min_mb: int = 50) -> int:
-    """Return total size of files > min_mb for reporting only."""
-    root = Path(downloads)
-    if not root.exists():
-        return 0
-    total = 0
-    threshold = min_mb * 1024 * 1024
-    try:
-        for fp in root.rglob("*"):
-            if fp.is_file() and not is_path_protected(fp, protected_paths):
-                try:
-                    sz = fp.stat().st_size
-                    if sz >= threshold:
-                        total += sz
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return total
 
 
 def _file_age_ok(fp: Path, min_age_days: int) -> bool:

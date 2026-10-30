@@ -101,18 +101,12 @@ class Api:
     def start_cache_scan(self) -> dict:
         def work(_cancel, emit):
             emit({"type": "progress", "message": "正在扫描已知缓存"})
-            targets = scan_all(build_targets(self._store.protected_paths), self._store.protected_paths)
-            self._cache_targets = [
-                {
-                    "id": item.id,
-                    "label": item.label,
-                    "level": item.level,
-                    "size": item.reclaimable_bytes,
-                    "description": item.description,
-                    "selected": item.level == "safe",
-                }
-                for item in targets
-            ]
+            targets = scan_all(
+                build_targets(self._store.protected_paths),
+                self._store.protected_paths,
+                on_batch=lambda done: emit({"type": "caches", "targets": [_cache_row(item) for item in done]}),
+            )
+            self._cache_targets = [_cache_row(item) for item in targets]
             return {"count": len(self._cache_targets)}
 
         return self._jobs.start("cache", work)
@@ -273,6 +267,17 @@ class Api:
             "projects": len(self._projects),
             "bytes": sum(int(item.get("size") or 0) for item in self._findings),
         }
+
+
+def _cache_row(item) -> dict:
+    return {
+        "id": item.id,
+        "label": item.label,
+        "level": item.level,
+        "size": item.reclaimable_bytes,
+        "description": item.description,
+        "selected": item.level == "safe",
+    }
 
 
 def _snapshot(snap) -> dict:

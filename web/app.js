@@ -388,6 +388,7 @@ function ask(title, html) {
 
 window.onProgress = (payload) => {
   if (payload.type === "progress") { setBusy(true, payload.message); return; }
+  if (payload.type === "caches") { state.caches = payload.targets || []; renderCaches(); return; }
   if (payload.type !== "done") return;
   setBusy(false);
   if (!payload.ok) { toast("出错：" + (payload.error || "未知错误")); return; }
