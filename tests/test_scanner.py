@@ -121,3 +121,22 @@ def test_system_tree_sums_without_children_but_keeps_advice_dirs(tmp_path: Path,
     assert node.children == []
     assert result.large_files == []
     assert [(item[0], item[1], item[2]) for item in result.advice_dirs] == [(str(temp), 700, "Windows 临时目录")]
+
+
+def test_file_count_matches_files_on_disk(tmp_path: Path):
+    app = tmp_path / "app"
+    (app / "node_modules" / "a" / "b" / "c").mkdir(parents=True)
+    (app / "docs").mkdir()
+    (app / "package.json").write_text("{}", encoding="utf-8")
+    (app / "src.js").write_text("1", encoding="utf-8")
+    (app / "docs" / "n.txt").write_text("n", encoding="utf-8")
+    (app / "node_modules" / "a" / "x.js").write_text("x", encoding="utf-8")
+    (app / "node_modules" / "a" / "b" / "y.js").write_text("y", encoding="utf-8")
+    (app / "node_modules" / "a" / "b" / "c" / "z.js").write_text("z", encoding="utf-8")
+    expected = sum(len(files) for _root, _dirs, files in os.walk(tmp_path))
+
+    result = scan_path(tmp_path, store_depth=8)
+
+    assert result.file_count == expected
+    modules = next(c for c in next(n for n in result.tree.children if n.name == "app").children if c.name == "node_modules")
+    assert modules.file_count == 3

@@ -136,3 +136,20 @@ def test_handoff_without_candidates_says_so(tmp_path: Path):
 def test_export_scope_ignores_other_drives():
     assert export_scope_projects([_project("C:\\w\\a", [])]) == []
     assert len(export_scope_projects([_project("c:\\w\\a", []), _project("d:\\w\\b", [])])) == 1
+
+
+def test_needs_rescan_flags_scans_from_before_rebuildable_paths():
+    from core.handoff import needs_rescan
+
+    old = _project("D:\\w\\old", [])
+    del old["regenerable_dirs"]
+    old["regenerable"] = {"node_modules": 5}
+    assert needs_rescan([old]) is True
+    assert needs_rescan([_project("D:\\w\\new", [("D:\\w\\new\\node_modules", "node_modules", 5)])]) is False
+    other_drive = _project("C:\\w\\old", [])
+    del other_drive["regenerable_dirs"]
+    other_drive["regenerable"] = {"node_modules": 5}
+    assert needs_rescan([other_drive]) is False
+    no_rebuildable = _project("D:\\w\\plain", [])
+    del no_rebuildable["regenerable_dirs"]
+    assert needs_rescan([no_rebuildable]) is False

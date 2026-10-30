@@ -40,6 +40,21 @@ def export_scope_projects(projects: list[dict]) -> list[dict]:
     return [item for item in projects if _on_export_drive(item.get("path", ""))]
 
 
+def needs_rescan(projects: list[dict]) -> bool:
+    """True when a saved scan predates rebuildable-directory paths.
+
+    Such a project has rebuildable bytes but no `regenerable_dirs` key, so an
+    export from it would be empty without saying why.
+    """
+    stack = export_scope_projects(projects)
+    while stack:
+        project = stack.pop()
+        stack.extend(project.get("subprojects") or [])
+        if project.get("regenerable") and "regenerable_dirs" not in project:
+            return True
+    return False
+
+
 def restore_command(project_path: str, kind: str) -> str:
     root = Path(project_path)
     if kind == "node_modules":

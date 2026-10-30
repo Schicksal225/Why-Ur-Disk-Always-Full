@@ -402,6 +402,7 @@ def _sum_tree(path: str, state: _State) -> tuple[int, int]:
         state.progress(f"正在盘查 {path}")
     size = 0
     file_count = 0
+    own_files = 0
     for entry in entries:
         try:
             info = entry.stat(follow_symlinks=False)
@@ -420,9 +421,11 @@ def _sum_tree(path: str, state: _State) -> tuple[int, int]:
         file_size = int(info.st_size)
         size += file_size
         file_count += 1
+        own_files += 1
         category = EXT_CATEGORY.get(os.path.splitext(entry.name)[1].lower(), "其他")
         state.categories[category] = state.categories.get(category, 0) + file_size
-    state.file_count += file_count
+    # Children already added their own files to the global count; add only this level's.
+    state.file_count += own_files
     if os.path.basename(path).lower() in state._watch_names:
         _note_special(path, size, None, state)
     return size, file_count
