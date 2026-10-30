@@ -123,7 +123,7 @@ main { padding: 28px 32px 40px; max-width: 1320px; width: 100%; }
 .switch input { width: 16px; height: 16px; accent-color: var(--accent); }
 
 .crumb { color: var(--ink-3); font-size: 12px; margin: -4px 0 8px; word-break: break-all; }
-.treemap { height: 360px; border-radius: 10px; overflow: hidden; background: var(--line-2); }
+.treemap { height: 360px; border-radius: 10px; overflow: hidden; background: var(--line-2); contain: layout paint; }
 .treemap svg { width: 100%; height: 100%; stroke: none; }
 .treemap rect { cursor: pointer; transition: opacity 0.12s; }
 .treemap g:hover rect { opacity: 0.86; }
@@ -178,11 +178,11 @@ main { padding: 28px 32px 40px; max-width: 1320px; width: 100%; }
 .empty { padding: 28px 16px; text-align: center; color: var(--ink-3); line-height: 1.6; }
 .empty strong { display: block; color: var(--ink-2); margin-bottom: 4px; }
 
-.jobbar { position: sticky; top: 12px; z-index: 5; display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 16px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-2); }
+.jobbar { position: sticky; top: 12px; z-index: 5; display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 16px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-2); contain: layout paint; }
 .jobbar-track { width: 120px; height: 4px; border-radius: 99px; background: var(--accent-soft); overflow: hidden; flex: none; }
-.jobbar-track span { display: block; width: 40%; height: 100%; background: var(--accent); border-radius: 99px; animation: slide 1.2s ease-in-out infinite; }
-#job-text { flex: 1; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
-@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
+.jobbar-track span { display: block; width: 100%; height: 100%; background: var(--accent); border-radius: 99px; animation: pulse 1.6s ease-in-out infinite; }
+#job-text { flex: 1; min-width: 0; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+@keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 
 dialog { border: 0; border-radius: 14px; padding: 22px; width: min(460px, 90vw); box-shadow: var(--shadow-2); color: var(--ink); }
 dialog::backdrop { background: rgba(16, 24, 40, 0.32); }

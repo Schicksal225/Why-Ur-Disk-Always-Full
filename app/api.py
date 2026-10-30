@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from app.jobs import JobRunner
+from app.progress import throttle
 from app.shortcuts import create_shortcuts
 from core.advisor import build_drive_advice
 from core.cleaner import build_targets, execute_target, format_bytes, get_disk_usage, scan_all
@@ -24,7 +25,7 @@ from core.store import Store
 class Api:
     def __init__(self, store: Store | None = None) -> None:
         self._store = store or Store()
-        self._jobs = JobRunner(self._emit)
+        self._jobs = JobRunner(throttle(self._emit))
         self._window = None
         self._results: list = []
         self._findings: list[dict] = []

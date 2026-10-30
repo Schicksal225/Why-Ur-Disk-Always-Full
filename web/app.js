@@ -212,11 +212,16 @@ function renderTree() {
   const host = $("treemap");
   if (!children.length) {
     host.innerHTML = empty(state.scanned ? "这一层没有更细的目录" : "还没有盘查", state.scanned ? "返回上一层看看。" : "盘查完成后按目录大小画出色块。");
+    host.dataset.signature = "";
     return;
   }
   const width = host.clientWidth || 600;
   const height = host.clientHeight || 360;
   const items = children.map((child, index) => ({ ...child, index })).filter((child) => child.size > 0);
+  // Same size and same blocks as what is already drawn: leave the SVG alone.
+  const signature = `${width}x${height}|${items.map((item) => `${item.path}:${item.size}`).join("|")}`;
+  if (host.dataset.signature === signature && host.firstElementChild) return;
+  host.dataset.signature = signature;
   const rects = layoutTreemap(items, 0, 0, width, height);
   const palette = ["#3b5bdb", "#1c7ed6", "#0c8599", "#2b8a3e", "#e67700", "#5f3dc4", "#c2255c", "#495057"];
   host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="目录占用图">${rects.map((rect, order) => {
