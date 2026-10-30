@@ -103,3 +103,34 @@ def test_handoff_writes_rules_and_metadata_only(tmp_path: Path):
     assert "给接手 agent 的操作规则" in report
     assert "app (node)" in report
     assert "不得删除" in report
+
+
+def test_git_status_only_runs_for_projects_with_rebuildable_dirs(tmp_path: Path):
+    calls: list[str] = []
+
+    def runner(command):
+        calls.append(command[2])
+        return ""
+
+    def project(name: str, regenerable: dict) -> dict:
+        folder = tmp_path / name
+        (folder / ".git").mkdir(parents=True)
+        return {
+            "path": str(folder),
+            "name": name,
+            "markers": [".git"],
+            "kind": "project",
+            "project_type": "git",
+            "size": 10,
+            "file_count": 1,
+            "source_mtime": 0,
+            "regenerable": regenerable,
+            "regenerable_dirs": [{"path": str(folder / "node_modules"), "kind": "node_modules", "bytes": 9}] if regenerable else [],
+            "subprojects": [],
+            "git": {"remote": "", "last_commit": "", "dirty": None},
+            "risk": "low",
+            "risk_note": "",
+        }
+
+    finalize_projects([project("with", {"node_modules": 9}), project("without", {})], runner=runner)
+    assert calls == [str(tmp_path / "with")]

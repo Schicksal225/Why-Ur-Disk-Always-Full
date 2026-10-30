@@ -65,6 +65,7 @@ def empty_project(path: str, markers: list[str], kind: str) -> dict:
         "file_count": 0,
         "source_mtime": 0.0,
         "regenerable": {},
+        "regenerable_dirs": [],
         "subprojects": [],
         "git": {"remote": "", "last_commit": "", "dirty": None},
         "risk": "low",
@@ -172,11 +173,16 @@ def _flatten(projects: list[dict]) -> list[dict]:
 
 
 def finalize_projects(projects: list[dict], runner=None, now: float | None = None) -> list[dict]:
-    """Attach git info in parallel. Past MAX_GIT_STATUS repos, dirty stays None (unknown)."""
+    """Attach git info in parallel.
+
+    `git status` runs only for projects that have rebuildable directories, the
+    ones a cleanup list can mention, and for at most MAX_GIT_STATUS of them
+    (largest first). Everywhere else dirty stays None (unknown).
+    """
     from concurrent.futures import ThreadPoolExecutor
 
     flat = _flatten(projects)
-    ordered = sorted(flat, key=lambda item: int(item.get("size") or 0), reverse=True)
+    ordered = sorted((item for item in flat if item.get("regenerable")), key=lambda item: int(item.get("size") or 0), reverse=True)
     checked = {id(item) for item in ordered[:MAX_GIT_STATUS]}
 
     def load(item: dict) -> None:

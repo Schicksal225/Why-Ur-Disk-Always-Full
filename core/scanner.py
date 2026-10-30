@@ -159,7 +159,9 @@ class _State:
     projects: list = field(default_factory=list)
     _cache_keys: set[str] = field(default_factory=set)
     _advice_keys: set[str] = field(default_factory=set)
+    _watch_names: frozenset[str] = frozenset()
     _visited: int = 0
+    _sum_dirs: int = 0
 
     def stop(self) -> bool:
         if self.cancel is not None and self.cancel.is_set():
@@ -206,8 +208,10 @@ def scan_path(
         _cache_keys={_norm_key(path) for path, _label in get_cache_clean_roots()},
         _advice_keys={_norm_key(path) for path, _label, _reason, _suggestion in get_advice_only_locations()},
     )
+    # Size-only walks still report these special directories; match on the last name first.
+    state._watch_names = frozenset(os.path.basename(key) for key in state._cache_keys | state._advice_keys)
     root_text = str(root)
-    total, _files, tree = _walk(root_text, 0, False, False, False, False, None, state)
+    total, _files, tree = _walk(root_text, 0, False, False, None, state)
     _trim(state.large, large_limit)
     _trim(state.stale, stale_limit)
     return ScanResult(
@@ -245,8 +249,6 @@ def _walk(
     depth: int,
     inside_project: bool,
     inside_chat: bool,
-    inside_system: bool,
-    inside_regenerable: bool,
     owner: dict | None,
     state: _State,
 ) -> tuple[int, int, DirNode | None]:
@@ -255,8 +257,13 @@ def _walk(
     if depth == 0 and is_reparse_point(path):
         state.skipped_reparse += 1
         return 0, 0, None
-    if not inside_system and is_system_tree(path):
-        inside_system = True
+    if is_system_tree(path):
+        # System trees are only measured: no per-file records, no sub-nodes.
+        size, file_count = _sum_tree(path, state)
+        if depth >= state.store_depth:
+            return size, file_count, None
+        node = DirNode(path=path, name=Path(path).name or path, size=size, file_count=file_count, protected="system")
+        return size, file_count, node
 
     size = 0
     file_count = 0
@@ -269,7 +276,7 @@ def _walk(
         entries = []
 
     names = [entry.name for entry in entries]
-    kind = "" if inside_system or inside_regenerable else marker_kind(path, names)
+    kind = marker_kind(path, names)
     created = None
     if kind:
         created = empty_project(path, _marker_names(names), kind)
@@ -279,7 +286,7 @@ def _walk(
             owner["subprojects"].append(created)
     here_project = inside_project or kind == "project"
     active = created or owner
-    protected = "system" if inside_system else "project" if here_project else ""
+    protected = "project" if here_project else ""
     chat_label = None if inside_chat else _chat_label(path)
     in_chat = inside_chat or chat_label is not None
 
@@ -300,20 +307,27 @@ def _walk(
         if is_dir:
             saw_dir = True
             regen = regenerable_name(entry.name, active["project_type"]) if active else None
-            child_size, child_files, child_node = _walk(
-                entry.path,
-                depth + 1,
-                here_project,
-                in_chat,
-                inside_system,
-                inside_regenerable or bool(regen),
-                active,
-                state,
-            )
+            if regen and active is not None:
+                # Rebuildable output: measure it, remember where it is, do not look inside.
+                child_size, child_files = _sum_tree(entry.path, state)
+                size += child_size
+                file_count += child_files
+                active["regenerable"][regen] = active["regenerable"].get(regen, 0) + child_size
+                active["regenerable_dirs"].append({"path": entry.path, "kind": regen, "bytes": child_size})
+                if depth + 1 < state.store_depth:
+                    child_nodes.append(
+                        DirNode(
+                            path=entry.path,
+                            name=entry.name,
+                            size=child_size,
+                            file_count=child_files,
+                            protected="project" if here_project else "",
+                        )
+                    )
+                continue
+            child_size, child_files, child_node = _walk(entry.path, depth + 1, here_project, in_chat, active, state)
             size += child_size
             file_count += child_files
-            if regen and active is not None:
-                active["regenerable"][regen] = active["regenerable"].get(regen, 0) + child_size
             if child_node is not None:
                 child_nodes.append(child_node)
             continue
@@ -324,7 +338,7 @@ def _walk(
         state._visited += 1
         if state.progress and state._visited % 400 == 0:
             state.progress(f"正在盘查 {entry.path}")
-        if active is not None and not inside_regenerable and info.st_mtime > active.get("source_mtime", 0):
+        if active is not None and info.st_mtime > active.get("source_mtime", 0):
             active["source_mtime"] = info.st_mtime
         category = category_for(entry.name)
         state.categories[category] = state.categories.get(category, 0) + file_size
@@ -344,8 +358,7 @@ def _walk(
             state.stale.append(record)
             if len(state.stale) > state.stale_limit * 4:
                 _trim(state.stale, state.stale_limit)
-        blocked = protected == "system" or here_project
-        if state.collect_duplicates and not blocked and file_size >= state.dup_min_bytes:
+        if state.collect_duplicates and not here_project and file_size >= state.dup_min_bytes:
             if len(state.dup_candidates) < 200_000:
                 state.dup_candidates.append((entry.path, file_size, info.st_mtime))
 
@@ -371,6 +384,48 @@ def _walk(
         children=child_nodes[: state.max_children],
     )
     return size, file_count, node
+
+
+def _sum_tree(path: str, state: _State) -> tuple[int, int]:
+    """Size and file count of a whole tree. Keeps only totals: no records, no nodes."""
+    if state.stop():
+        return 0, 0
+    try:
+        with os.scandir(path) as handle:
+            entries = list(handle)
+    except OSError:
+        state.skipped_errors += 1
+        return 0, 0
+    state.dir_count += 1
+    state._sum_dirs += 1
+    if state.progress and state._sum_dirs % 200 == 0:
+        state.progress(f"正在盘查 {path}")
+    size = 0
+    file_count = 0
+    for entry in entries:
+        try:
+            info = entry.stat(follow_symlinks=False)
+        except OSError:
+            state.skipped_errors += 1
+            continue
+        attrs = getattr(info, "st_file_attributes", 0)
+        if attrs & _ATTR_REPARSE:
+            state.skipped_reparse += 1
+            continue
+        if attrs & _ATTR_DIRECTORY or stat.S_ISDIR(info.st_mode):
+            child_size, child_files = _sum_tree(entry.path, state)
+            size += child_size
+            file_count += child_files
+            continue
+        file_size = int(info.st_size)
+        size += file_size
+        file_count += 1
+        category = EXT_CATEGORY.get(os.path.splitext(entry.name)[1].lower(), "其他")
+        state.categories[category] = state.categories.get(category, 0) + file_size
+    state.file_count += file_count
+    if os.path.basename(path).lower() in state._watch_names:
+        _note_special(path, size, None, state)
+    return size, file_count
 
 
 def _note_special(path: str, size: int, chat_label: str | None, state: _State) -> None:
