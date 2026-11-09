@@ -18,6 +18,8 @@
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></symbol>
     <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5"/></symbol>
   </svg>
 
   <div class="app">
@@ -41,10 +43,13 @@
     </aside>
 
     <main>
-      <div id="jobbar" class="jobbar hidden" role="status" aria-live="polite">
-        <div class="jobbar-track"><span></span></div>
+      <div id="jobbar" class="jobbar hidden" data-mode="indeterminate" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
         <p id="job-text">处理中</p>
-        <button id="job-cancel" class="ghost">取消</button>
+        <div class="jobbar-track" aria-hidden="true"><span id="job-fill"></span></div>
+        <span id="job-percent" class="job-percent hidden"></span>
+        <span id="job-elapsed" class="job-elapsed">00:00</span>
+        <button id="job-cancel" class="ghost small">取消</button>
       </div>
 
       <section id="overview" class="page">
@@ -129,12 +134,16 @@
       <section id="clean" class="page hidden">
         <header class="page-head">
           <div><h1>清理</h1><p class="muted">只清理能自动重新生成的缓存。这些文件直接删除，不进回收站。右侧大小是最多能释放的量，被占用或受保护的文件会跳过，实际可能略少。</p></div>
-          <button id="cache-run-btn" class="primary">清理勾选的缓存</button>
+          <button id="cache-run-btn" class="primary icon-btn" title="清理勾选的缓存" aria-label="清理勾选的缓存"><svg><use href="#i-broom"/></svg></button>
         </header>
+        <div id="clean-result" class="hidden"></div>
         <article class="card">
           <div class="card-head">
             <h2>已知缓存</h2>
-            <button id="cache-scan-btn" class="ghost">重新扫描</button>
+            <div class="head-actions">
+              <span id="cache-sum" class="muted"></span>
+              <button id="cache-scan-btn" class="ghost icon-btn small" title="重新扫描" aria-label="重新扫描"><svg><use href="#i-refresh"/></svg></button>
+            </div>
           </div>
           <ul id="cache-list" class="finding-list"></ul>
         </article>

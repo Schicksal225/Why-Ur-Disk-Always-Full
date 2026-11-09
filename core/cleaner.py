@@ -270,9 +270,11 @@ def scan_all(
     progress: ProgressCallback | None = None,
     min_age_days: int = 1,
     on_batch: Callable[[list[CleanTarget]], None] | None = None,
+    on_measured: Callable[[CleanTarget], None] | None = None,
 ) -> list[CleanTarget]:
     """Measure every target. Cleanable ones go first and are reported through
-    `on_batch` as soon as they are done, before the advice-only ones start."""
+    `on_batch` as soon as they are done, before the advice-only ones start.
+    `on_measured` fires after each single target is measured, from worker threads."""
 
     def measure(target: CleanTarget) -> None:
         if progress:
@@ -280,6 +282,8 @@ def scan_all(
         target.reclaimable_bytes = scan_target(target, protected_paths, min_age_days=min_age_days)
         if target.level == "safe":
             target.selected = True
+        if on_measured:
+            on_measured(target)
 
     safe = [item for item in targets if item.level == "safe"]
     rest = [item for item in targets if item.level != "safe"]

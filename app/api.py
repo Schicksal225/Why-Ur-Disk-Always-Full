@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import asdict
 from pathlib import Path
 
@@ -100,11 +101,23 @@ class Api:
 
     def start_cache_scan(self) -> dict:
         def work(_cancel, emit):
-            emit({"type": "progress", "message": "正在扫描已知缓存"})
+            targets = build_targets(self._store.protected_paths)
+            total = len(targets)
+            seen = [0]
+            lock = threading.Lock()
+
+            def measured(target) -> None:
+                with lock:
+                    seen[0] += 1
+                    percent = round(seen[0] * 100 / total) if total else 100
+                emit({"type": "progress", "message": f"正在统计：{target.label}", "percent": percent})
+
+            emit({"type": "progress", "message": "正在扫描已知缓存", "percent": 0})
             targets = scan_all(
-                build_targets(self._store.protected_paths),
+                targets,
                 self._store.protected_paths,
                 on_batch=lambda done: emit({"type": "caches", "targets": [_cache_row(item) for item in done]}),
+                on_measured=measured,
             )
             self._cache_targets = [_cache_row(item) for item in targets]
             return {"count": len(self._cache_targets)}
@@ -149,15 +162,24 @@ class Api:
             return {"ok": False, "error": "没有可直接清理的缓存"}
 
         def work(_cancel, emit):
-            emit({"type": "progress", "message": "正在清理缓存"})
+            emit({"type": "progress", "message": "正在清理缓存", "percent": 0})
             freed = 0
             lines = []
             min_age = int(self._store.get_preference("temp_min_age_days", 1))
-            for target in targets:
+            total = len(targets)
+            for index, target in enumerate(targets, 1):
+                emit(
+                    {
+                        "type": "progress",
+                        "message": f"正在清理 {index}/{total}：{target.label}",
+                        "percent": round((index - 1) * 100 / total),
+                    }
+                )
                 result = execute_target(target, self._store.protected_paths, min_age_days=min_age)
                 freed += result.freed_bytes
                 lines.append({"label": result.label, "freed": result.freed_bytes, "errors": result.errors[:3]})
             self._store.add_clean_run({"freed_bytes": freed, "summary": f"{len(lines)} 项，释放 {format_bytes(freed)}", "details": lines})
+            emit({"type": "progress", "message": "正在整理结果", "percent": 100})
             return {"freed": format_bytes(freed), "lines": lines}
 
         return self._jobs.start("clean", work)
@@ -217,14 +239,24 @@ class Api:
         findings = []
         categories: dict[str, int] = {}
         projects = []
-        for root in roots:
+        total = len(roots)
+        multi = total > 1
+
+        def send(message: str, percent: int | None = None) -> None:
+            payload: dict = {"type": "progress", "message": message}
+            if percent is not None:
+                payload["percent"] = percent
+            emit(payload)
+
+        for index, root in enumerate(roots, 1):
             if cancel.is_set():
                 break
-            emit({"type": "progress", "message": f"正在盘查 {root}"})
+            base = round((index - 1) * 100 / total) if multi else None
+            send(f"正在盘查 {root}（{index}/{total}）", base)
             result = scan_path(
                 root,
                 cancel=cancel,
-                progress=lambda message, drive=root: emit({"type": "progress", "message": f"{drive} {message}"}),
+                progress=lambda message, drive=root, percent=base: send(f"{drive} {message}", percent),
                 collect_duplicates=duplicates,
             )
             results.append(result)
@@ -235,8 +267,9 @@ class Api:
             if duplicates and result.dup_candidates and not cancel.is_set():
                 emit({"type": "progress", "message": f"正在比对 {root} 的重复文件"})
                 findings.extend(_finding_dict(item) for item in findings_from_duplicates(find_duplicates(result.dup_candidates)))
+            send(f"{root} 盘查完成", round(index * 100 / total) if multi else None)
         if not cancel.is_set():
-            emit({"type": "progress", "message": "正在读取项目的 git 信息"})
+            send("正在读取项目的 git 信息")
             projects = finalize_projects(projects)
         advice = [asdict(item) for item in build_drive_advice(get_disk_usage(), _finding_objects(findings), categories)]
         self._results = results

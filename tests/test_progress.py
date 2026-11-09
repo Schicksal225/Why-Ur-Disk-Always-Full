@@ -24,3 +24,13 @@ def test_throttle_passes_other_event_types_untouched():
     wrapped({"type": "caches", "targets": []})
     wrapped({"type": "caches", "targets": [1]})
     assert [item["type"] for item in sent] == ["progress", "caches", "caches"]
+
+
+def test_throttle_lets_the_next_job_report_progress_immediately():
+    sent = []
+    wrapped = throttle(sent.append, interval=10.0, now=lambda: 0.0)
+    wrapped({"type": "progress", "job": "cache", "message": "a"})
+    wrapped({"type": "progress", "job": "cache", "message": "b"})
+    wrapped({"type": "done", "job": "cache", "ok": True})
+    wrapped({"type": "progress", "job": "clean", "message": "c"})
+    assert [item.get("message") for item in sent] == ["a", None, "c"]

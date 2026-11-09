@@ -27,11 +27,15 @@ class JobRunner:
             cancel = self._cancel
 
             def run() -> None:
+                def emit(payload: dict) -> None:
+                    payload.setdefault("job", name)
+                    self._emit(payload)
+
                 try:
-                    result = worker(cancel, self._emit)
-                    self._emit({"type": "done", "job": name, "ok": True, "result": result})
+                    result = worker(cancel, emit)
+                    emit({"type": "done", "job": name, "ok": True, "result": result})
                 except Exception as exc:
-                    self._emit({"type": "done", "job": name, "ok": False, "error": str(exc)})
+                    emit({"type": "done", "job": name, "ok": False, "error": str(exc)})
 
             self._thread = threading.Thread(target=run, name=f"pcopt-{name}", daemon=True)
             self._thread.start()

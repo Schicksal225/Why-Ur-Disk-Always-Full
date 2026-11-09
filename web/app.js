@@ -26,6 +26,7 @@ const state = {
   scanned: false,
   exported: false,
   busy: false,
+  jobCancelable: true,
 };
 
 function bytes(n) {
@@ -46,11 +47,46 @@ function toast(text) {
   toast.timer = setTimeout(() => node.classList.add("hidden"), 4200);
 }
 
-function setBusy(on, text) {
+const BUSY_BUTTONS = ["scan-btn", "finding-run-btn", "cache-run-btn", "cache-scan-btn", "export-btn"];
+let jobStartedAt = 0;
+let jobTicker = null;
+
+function tickElapsed() {
+  const seconds = Math.max(0, Math.floor((Date.now() - jobStartedAt) / 1000));
+  const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
+  const ss = String(seconds % 60).padStart(2, "0");
+  $("job-elapsed").textContent = `${mm}:${ss}`;
+}
+
+function setJobMode(percent) {
+  const known = typeof percent === "number" && Number.isFinite(percent);
+  $("jobbar").dataset.mode = known ? "determinate" : "indeterminate";
+  $("job-fill").style.width = known ? `${Math.max(0, Math.min(100, percent))}%` : "0%";
+  $("job-percent").classList.toggle("hidden", !known);
+  if (known) $("job-percent").textContent = `${Math.round(percent)}%`;
+}
+
+function setBusy(on, text, cancellable) {
+  const wasBusy = state.busy;
   state.busy = on;
   $("jobbar").classList.toggle("hidden", !on);
   if (text) $("job-text").textContent = text;
-  ["scan-btn", "finding-run-btn", "cache-run-btn", "cache-scan-btn", "export-btn"].forEach((id) => { $(id).disabled = on; });
+  BUSY_BUTTONS.forEach((id) => { $(id).disabled = on; });
+  if (on && !wasBusy) {
+    state.jobCancelable = cancellable !== false;
+    $("job-cancel").classList.toggle("hidden", !state.jobCancelable);
+    jobStartedAt = Date.now();
+    setJobMode(null);
+    tickElapsed();
+    clearInterval(jobTicker);
+    jobTicker = setInterval(tickElapsed, 500);
+  }
+  if (!on) {
+    clearInterval(jobTicker);
+    jobTicker = null;
+    jobStartedAt = 0;
+    updateCacheActions();
+  }
 }
 
 function empty(title, body) {
@@ -68,6 +104,7 @@ function show(page) {
   if (page === "settings") loadSettings();
   if (page === "projects") renderProjects();
   if (page === "clean" && !state.caches.length && !state.busy) startCacheScan();
+  if (page === "clean") updateCacheActions();
   if (page === "storage") renderStorage();
 }
 
@@ -350,16 +387,46 @@ function renderCaches() {
       ? `<input type="checkbox" data-id="${esc(item.id)}" ${item.selected ? "checked" : ""} aria-label="勾选 ${esc(item.label)}"/>`
       : `<svg class="lock" aria-label="不可执行"><use href="#i-shield"/></svg>`;
     return `<li class="finding">${control}<div><div class="finding-title"><strong>${esc(item.label)}</strong><span class="badge ${action}">${esc(ACTION_TEXT[action])}</span></div><p>${esc(item.description)}</p></div><span class="size">${bytes(item.size)}</span></li>`;
-  }).join("") : empty("正在准备", "稍等，正在统计缓存大小。");
+  }).join("") : empty(state.busy ? "正在扫描缓存" : "还没有缓存数据", state.busy ? "大小统计完成后会自动出现。" : "点右上角的刷新按钮重新扫描。");
   $("cache-list").querySelectorAll("input[data-id]").forEach((box) => {
-    box.onchange = () => { const found = state.caches.find((item) => item.id === box.dataset.id); if (found) found.selected = box.checked; };
+    box.onchange = () => {
+      const found = state.caches.find((item) => item.id === box.dataset.id);
+      if (found) found.selected = box.checked;
+      updateCacheActions();
+    };
   });
+  updateCacheActions();
+}
+
+function updateCacheActions() {
+  const selected = state.caches.filter((item) => item.level === "safe" && item.selected);
+  const total = selected.reduce((sum, item) => sum + Number(item.size || 0), 0);
+  $("cache-sum").textContent = selected.length
+    ? `已勾选 ${selected.length} 项 · 最多 ${bytes(total)}`
+    : (state.caches.length ? "没有勾选" : "");
+  $("cache-run-btn").disabled = state.busy || !selected.length;
+}
+
+function renderCleanResult(result) {
+  const lines = Array.isArray(result.lines) ? result.lines : [];
+  const partial = lines.filter((line) => (line.errors || []).length).length;
+  const time = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  const node = $("clean-result");
+  node.classList.remove("hidden");
+  node.innerHTML = `<div class="result-ok"><svg><use href="#i-check"/></svg><div><strong>清理完成，释放约 ${esc(result.freed || "0 B")}</strong><span>处理 ${lines.length} 类缓存${partial ? ` · ${partial} 类有文件被占用或受保护，已跳过` : ""} · ${esc(time)}</span></div><button class="ghost small" id="clean-result-close">关闭</button></div>`;
+  $("clean-result-close").onclick = () => node.classList.add("hidden");
 }
 
 async function startCacheScan() {
-  const result = await api().start_cache_scan();
-  if (!result.ok) toast(result.error);
-  else setBusy(true, "正在统计缓存大小");
+  let result = await api().start_cache_scan();
+  // The finished job's thread can still be winding down when this runs right after a clean.
+  if (!result.ok && /请等待/.test(result.error || "")) {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    result = await api().start_cache_scan();
+  }
+  if (!result.ok) { toast(result.error); return; }
+  setBusy(true, "正在统计缓存大小", false);
+  renderCaches();
 }
 
 // ---------------------------------------------------------------- perf / settings
@@ -400,7 +467,11 @@ function ask(title, html) {
 }
 
 window.onProgress = (payload) => {
-  if (payload.type === "progress") { setBusy(true, payload.message); return; }
+  if (payload.type === "progress") {
+    setBusy(true, payload.message, payload.job === "scan");
+    setJobMode(payload.percent);
+    return;
+  }
   if (payload.type === "caches") { state.caches = payload.targets || []; renderCaches(); return; }
   if (payload.type !== "done") return;
   setBusy(false);
@@ -413,7 +484,13 @@ window.onProgress = (payload) => {
     state.caches = (data.targets || []).map((item) => (chosen.has(item.id) && item.level === "safe" ? { ...item, selected: chosen.get(item.id) } : item));
     renderCaches();
   });
-  if (payload.job === "clean") { toast(`缓存清理完成，释放约 ${result.freed}`); startCacheScan(); refreshDisks(); }
+  if (payload.job === "clean") {
+    renderCleanResult(result);
+    toast(`清理完成，释放约 ${result.freed || "0 B"}`);
+    refreshDisks();
+    // Give the finished job thread a moment to exit, then refresh the sizes.
+    setTimeout(() => { if (!state.busy) startCacheScan(); }, 300);
+  }
   if (payload.job === "execute") {
     toast(`处理完成：成功 ${result.ok_count ?? 0} 项，跳过 ${result.fail_count ?? 0} 项，释放约 ${result.freed}`);
     hydrate();
@@ -467,7 +544,7 @@ $("finding-run-btn").onclick = async () => {
   const ok = await ask("确认处理", `<ul>${lines.join("")}</ul><p class="hint" style="margin-top:12px">执行前会再检查一遍，系统文件和项目目录会被拦下。回收站放不下的文件会跳过，不会被永久删除。</p>`);
   if (!ok) return;
   const result = await api().execute(chosen.map((item) => item.id));
-  if (!result.ok) toast(result.error); else setBusy(true, "正在处理勾选项");
+  if (!result.ok) toast(result.error); else setBusy(true, "正在处理勾选项", false);
 };
 
 $("cache-scan-btn").onclick = startCacheScan;
@@ -476,7 +553,7 @@ $("cache-run-btn").onclick = async () => {
   if (!ids.length) { toast("没有勾选缓存"); return; }
   if (!(await ask("清理缓存", `<p>将直接删除 ${ids.length} 类缓存。它们会由软件重新生成，但不能从回收站还原。</p>`))) return;
   const result = await api().execute_caches(ids);
-  if (!result.ok) toast(result.error); else setBusy(true, "正在清理缓存");
+  if (!result.ok) toast(result.error); else setBusy(true, "正在清理缓存", false);
 };
 
 $("export-btn").onclick = async () => {

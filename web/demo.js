@@ -32,14 +32,43 @@
       get_version: async () => "1.1.0",
       get_overview: async () => ({ disks: [{ drive: "C", used_gb: 214, total_gb: 237, free_gb: 23, percent: 90 }, { drive: "D", used_gb: 512, total_gb: 931, free_gb: 419, percent: 55 }, { drive: "E", used_gb: 120, total_gb: 465, free_gb: 345, percent: 26 }], snapshot: {}, tips: ["C 盘剩余不足 10%，建议先盘查 C 盘。"] }),
       load_cached: async () => ({ ok: false }),
-      start_scan: async () => { scanned = true; window.onProgress({ type: "progress", message: "C:\\ 正在盘查 C:\\Users\\A\\AppData\\Local" }); done("scan", { findings: findings.length, projects: projects.length }); return { ok: true }; },
+      start_scan: async () => { scanned = true; window.onProgress({ type: "progress", job: "scan", message: "C:\\ 正在盘查 C:\\Users\\A\\AppData\\Local" }); done("scan", { findings: findings.length, projects: projects.length }); return { ok: true }; },
       cancel_scan: async () => ({ ok: true }),
       get_results: async () => (scanned ? { findings, categories: { 视频: 64 * GB, 镜像: 42 * GB, 程序: 33 * GB, 压缩包: 21 * GB, 文档: 9 * GB, 图片: 7 * GB, 其他: 88 * GB }, advice: [{ title: "系统盘空间不足", detail: "C 盘剩余 23 GB（低于 15%）。可以把桌面、文档、下载迁到 D 盘；若仍不够，可在管理员终端执行 powercfg -h off 关闭休眠。本工具不会代为执行。", severity: "warning" }, { title: "可处理空间", detail: "缓存可直接清理约 5.2 GB。建议移入回收站约 2.3 GB（可撤销）。另有约 42 GB 只作提醒。", severity: "info" }], trees, scans: [{ root: "C:\\", scanned_at: new Date(Date.now() - 9 * 86400000).toISOString() }] } : { findings: [], categories: {}, advice: [], trees: [], scans: [] }),
       get_projects: async () => ({ projects: scanned ? projects : [] }),
-      start_cache_scan: async () => { done("cache", {}); return { ok: true }; },
+      start_cache_scan: async () => {
+        const labels = ["用户临时文件 (%TEMP%)", "Chrome 浏览器缓存", "Windows 临时目录"];
+        let step = 0;
+        const timer = setInterval(() => {
+          if (step < labels.length) {
+            window.onProgress({ type: "progress", job: "cache", message: `正在统计：${labels[step]}`, percent: Math.round(((step + 1) / labels.length) * 100) });
+            step += 1;
+          } else {
+            clearInterval(timer);
+            done("cache", {});
+          }
+        }, 450);
+        return { ok: true };
+      },
       get_cache_targets: async () => ({ targets: [{ id: "user_temp", label: "用户临时文件 (%TEMP%)", level: "safe", size: 3.4 * GB, description: "超过设定天数的用户临时文件", selected: true }, { id: "chrome_cache", label: "Chrome 浏览器缓存", level: "safe", size: 1.1 * GB, description: "仅 Cache，不清理 Cookie/书签", selected: true }, { id: "windows_temp", label: "Windows 临时目录", level: "advice", size: 0.6 * GB, description: "位于系统目录，只统计并建议使用「存储感知」", selected: false }] }),
       execute: async () => { done("execute", { ok_count: 1, fail_count: 0, freed: "3.40 GB" }); return { ok: true }; },
-      execute_caches: async () => { done("clean", { freed: "4.50 GB" }); return { ok: true }; },
+      execute_caches: async () => {
+        const lines = [
+          { label: "用户临时文件 (%TEMP%)", freed: 3.4 * GB, errors: [] },
+          { label: "Chrome 浏览器缓存", freed: 1.1 * GB, errors: ["f_0001: 被占用"] },
+        ];
+        let step = 0;
+        const timer = setInterval(() => {
+          if (step < lines.length) {
+            window.onProgress({ type: "progress", job: "clean", message: `正在清理 ${step + 1}/${lines.length}：${lines[step].label}`, percent: Math.round((step / lines.length) * 100) });
+            step += 1;
+          } else {
+            clearInterval(timer);
+            done("clean", { freed: "4.50 GB", lines });
+          }
+        }, 600);
+        return { ok: true };
+      },
       export_handoff: async () => ({ ok: true, path: "C:\\PCOptimizer\\exports\\handoff-20261009-180000\\REPORT.md" }),
       get_processes: async () => ({ snapshot: { cpu_percent: 18, memory_percent: 71, memory_used_gb: 11.4, memory_total_gb: 16, processes: [{ pid: 4120, name: "chrome.exe", cpu_percent: 6.2, memory_mb: 2140, can_kill: true, suspicious: true }, { pid: 920, name: "Code.exe", cpu_percent: 3.1, memory_mb: 980, can_kill: true }, { pid: 1, name: "explorer.exe", cpu_percent: 0.4, memory_mb: 160, can_kill: false, kill_block_reason: "系统关键进程" }] }, advice: [{ title: "浏览器占用较多", detail: "Chrome 约 2.1 GB，关掉不用的标签页即可释放。", severity: "warning" }] }),
       kill_processes: async () => ({ killed: [] }),
@@ -48,4 +77,37 @@
       create_shortcut: async () => ({ ok: true, paths: [] }),
     },
   };
+
+  // Preview specific UI states: index.html?demo=1&scene=scan|progress|storage|clean|cleandone
+  const scene = new URLSearchParams(location.search).get("scene");
+  if (scene) {
+    const go = (page) => document.querySelector(`.nav-btn[data-page="${page}"]`).click();
+    setTimeout(() => {
+      if (scene === "scan") {
+        go("storage");
+        setTimeout(() => document.getElementById("scan-btn").click(), 100);
+      }
+      if (scene === "progress") {
+        window.onProgress({ type: "progress", job: "clean", message: "正在清理 3/8：Chrome 浏览器缓存", percent: 42 });
+      }
+      if (scene === "job") {
+        window.onProgress({ type: "progress", job: "scan", message: "C:\\ 正在盘查 C:\\Users\\A\\AppData\\Local" });
+      }
+      if (scene === "jobpct") {
+        window.onProgress({ type: "progress", job: "clean", message: "正在清理 3/8：Chrome 浏览器缓存", percent: 42 });
+      }
+      if (scene === "storage") {
+        go("storage");
+        setTimeout(() => document.getElementById("scan-btn").click(), 100);
+      }
+      if (scene === "clean" || scene === "cleandone") {
+        go("clean");
+        if (scene === "cleandone") {
+          setTimeout(() => {
+            window.onProgress({ type: "done", job: "clean", ok: true, result: { freed: "4.50 GB", lines: [{ label: "用户临时文件 (%TEMP%)", freed: 3.4 * GB, errors: [] }, { label: "Chrome 浏览器缓存", freed: 1.1 * GB, errors: ["f_0001: 被占用"] }] } });
+          }, 2400);
+        }
+      }
+    }, 300);
+  }
 })();

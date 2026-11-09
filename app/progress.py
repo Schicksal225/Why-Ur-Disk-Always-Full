@@ -24,6 +24,11 @@ def throttle(emit: Emit, interval: float = 0.5, now: Callable[[], float] = time.
                 if last[0] is not None and moment - last[0] < interval:
                     return
                 last[0] = moment
+        else:
+            # A finished event (done/caches) starts a new reporting window, so the
+            # next job's first progress message is never swallowed by the previous job.
+            with lock:
+                last[0] = None
         emit(payload)
 
     return wrapped
