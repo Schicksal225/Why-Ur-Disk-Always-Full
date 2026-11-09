@@ -335,6 +335,17 @@ def _delete_file(fp: Path, protected_paths: Iterable[str]) -> tuple[bool, str | 
         return False, str(exc)
 
 
+_MAX_CLEAN_ERRORS = 20
+
+
+def _is_reparse(path: str | os.PathLike[str]) -> bool:
+    try:
+        attrs = os.lstat(path).st_file_attributes
+    except (OSError, AttributeError):
+        return False
+    return bool(attrs & _ATTR_REPARSE)
+
+
 def _clean_directory(
     path: Path,
     protected_paths: Iterable[str],
@@ -366,39 +377,63 @@ def _clean_directory(
                 errors.append(f"{path}: {err}")
         return freed, files, skipped, errors
 
-    try:
-        for root, dirs, filenames in os.walk(path, topdown=False):
-            root_path = Path(root)
-            for name in filenames:
-                fp = root_path / name
-                if pattern and not fp.match(pattern):
-                    continue
-                if min_age_days and not _file_age_ok(fp, min_age_days):
-                    skipped += 1
-                    continue
-                try:
-                    sz = fp.stat().st_size
-                except OSError:
-                    sz = 0
-                ok, err = _delete_file(fp, protected_paths)
-                if ok:
-                    freed += sz
-                    files += 1
-                else:
-                    skipped += 1
-                    if err and len(errors) < 20:
-                        errors.append(f"{fp}: {err}")
-            for name in dirs:
-                dp = root_path / name
-                if is_path_protected(dp, protected_paths):
-                    continue
-                try:
-                    if not any(dp.iterdir()):
-                        dp.rmdir()
-                except OSError:
-                    pass
-    except OSError as exc:
-        errors.append(str(exc))
+    if _is_reparse(path):
+        return freed, files, skipped, errors
+
+    # Iterative walk. os.walk recurses once per directory, so a deeply nested
+    # tree (or a junction loop) raises RecursionError and aborts the whole
+    # cleanup; reparse points are skipped, like the scanner does.
+    cutoff = time.time() - min_age_days * 86400 if min_age_days else None
+    dirs: list[str] = []
+    stack = [str(path)]
+    while stack:
+        current = stack.pop()
+        subdirs: list[str] = []
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    attrs = getattr(info, "st_file_attributes", 0)
+                    if attrs & _ATTR_REPARSE:
+                        continue
+                    if attrs & _ATTR_DIRECTORY:
+                        subdirs.append(entry.path)
+                        dirs.append(entry.path)
+                        continue
+                    if pattern and not fnmatch.fnmatch(entry.name.lower(), pattern.lower()):
+                        continue
+                    if cutoff is not None and info.st_mtime >= cutoff:
+                        skipped += 1
+                        continue
+                    ok, err = _delete_file(Path(entry.path), protected_paths)
+                    if ok:
+                        freed += int(info.st_size)
+                        files += 1
+                    else:
+                        skipped += 1
+                        if err and len(errors) < _MAX_CLEAN_ERRORS:
+                            errors.append(f"{entry.path}: {err}")
+        except OSError as exc:
+            if len(errors) < _MAX_CLEAN_ERRORS:
+                errors.append(str(exc))
+            continue
+        stack.extend(subdirs)
+
+    # Children were appended after their parent, so reversing removes
+    # deepest directories first and leaves no empty folders behind.
+    for current in reversed(dirs):
+        if is_path_protected(current, protected_paths):
+            continue
+        try:
+            with os.scandir(current) as entries:
+                empty = next(entries, None) is None
+            if empty:
+                os.rmdir(current)
+        except OSError:
+            pass
     return freed, files, skipped, errors
 
 

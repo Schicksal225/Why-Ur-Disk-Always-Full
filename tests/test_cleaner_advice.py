@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from pathlib import Path
+
+import pytest
 
 from core.cleaner import CleanTarget, build_targets, execute_target, scan_all, scan_target
 
@@ -90,3 +93,59 @@ def test_thumbcache_measure_ignores_nested_folders(tmp_path: Path):
     (explorer / "old" / "thumbcache_32.db").write_bytes(b"n" * 900)
     target = CleanTarget(id="thumbcache", label="thumb", level="safe", paths=[str(explorer)])
     assert scan_target(target, []) == 300
+
+
+def test_deep_tree_is_cleaned_without_recursion_error(tmp_path: Path, monkeypatch):
+    # A recursive os.walk aborts at ~1000 nested directories with RecursionError,
+    # which made "clean" fail on a temp folder that held such a tree.
+    monkeypatch.setattr("core.cleaner.is_safe_delete_target", lambda *_args, **_kwargs: True)
+    root = tmp_path / "deep"
+    current = root
+    try:
+        os.mkdir(root)
+        for _ in range(1200):
+            current = current / "a"
+            os.mkdir(current)
+    except OSError:
+        pytest.skip("long paths are not available on this machine")
+
+    target = CleanTarget(id="chrome_cache", label="cache", level="safe", paths=[str(root)])
+    result = execute_target(target, [])
+
+    assert result.errors == []
+    assert (result.freed_bytes, result.files_removed, result.skipped) == (0, 0, 0)
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows-only")
+def test_junction_inside_cache_is_not_followed(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("core.cleaner.is_safe_delete_target", lambda *_args, **_kwargs: True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    keep = outside / "keep.bin"
+    keep.write_bytes(b"k" * 32)
+    root = tmp_path / "cache"
+    root.mkdir()
+    (root / "junk.bin").write_bytes(b"j" * 64)
+    link = root / "link"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip("cannot create a directory junction here")
+
+    try:
+        target = CleanTarget(id="chrome_cache", label="cache", level="safe", paths=[str(root)])
+        result = execute_target(target, [])
+        assert keep.exists()
+        assert result.files_removed == 1
+        assert result.freed_bytes == 64
+    finally:
+        try:
+            if link.exists():
+                os.rmdir(link)
+        except OSError:
+            pass
+
