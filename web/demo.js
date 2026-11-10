@@ -29,7 +29,7 @@
   let scanned = false;
   window.pywebview = {
     api: {
-      get_version: async () => "1.1.0",
+      get_version: async () => "1.2.0",
       get_overview: async () => ({ disks: [{ drive: "C", used_gb: 214, total_gb: 237, free_gb: 23, percent: 90 }, { drive: "D", used_gb: 512, total_gb: 931, free_gb: 419, percent: 55 }, { drive: "E", used_gb: 120, total_gb: 465, free_gb: 345, percent: 26 }], snapshot: {}, tips: ["C 盘剩余不足 10%，建议先盘查 C 盘。"] }),
       load_cached: async () => ({ ok: false }),
       start_scan: async () => { scanned = true; window.onProgress({ type: "progress", job: "scan", message: "C:\\ 正在盘查 C:\\Users\\A\\AppData\\Local" }); done("scan", { findings: findings.length, projects: projects.length }); return { ok: true }; },
@@ -99,6 +99,16 @@
       if (scene === "storage") {
         go("storage");
         setTimeout(() => document.getElementById("scan-btn").click(), 100);
+      }
+      if (scene === "scanned") {
+        go("storage");
+        setTimeout(() => document.getElementById("scan-btn").click(), 100);
+        setTimeout(() => go("overview"), 2200);
+      }
+      if (scene === "projects" || scene === "perf" || scene === "settings") {
+        go("storage");
+        setTimeout(() => document.getElementById("scan-btn").click(), 100);
+        setTimeout(() => go(scene), 2200);
       }
       if (scene === "clean" || scene === "cleandone") {
         go("clean");

@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
   <title>PC Optimizer</title>
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="app.css" />
@@ -20,14 +21,23 @@
     <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3"/><path d="M20 8V5a1 1 0 0 0-1-1h-3"/><path d="M4 16v3a1 1 0 0 0 1 1h3"/><path d="M20 16v3a1 1 0 0 1-1 1h-3"/><path d="M3 12h18"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4"/><circle cx="12" cy="17.5" r=".5" fill="currentColor" stroke="none"/></symbol>
   </svg>
 
-  <div class="app">
-    <aside class="nav" aria-label="主导航">
+  <div class="shell">
+    <aside class="rail" aria-label="主导航">
       <div class="brand">
-        <img src="../assets/icon.ico" alt="" class="brand-icon" onerror="this.style.display='none'" />
-        <div><strong>PC Optimizer</strong><small id="version">本地存储盘查</small></div>
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <rect width="32" height="32" rx="8" fill="#efe9dd"/>
+          <circle cx="16" cy="16" r="9" fill="none" stroke="#2a2926" stroke-width="4.5"/>
+        </svg>
+        <div class="brand-copy">
+          <strong>PC Optimizer</strong>
+          <small id="version">磁盘审计台</small>
+        </div>
       </div>
+      <div class="brand-rule"></div>
       <nav>
         <button class="nav-btn active" data-page="overview"><svg><use href="#i-home"/></svg>总览</button>
         <button class="nav-btn" data-page="storage"><svg><use href="#i-disk"/></svg>存储盘查</button>
@@ -36,13 +46,16 @@
         <button class="nav-btn" data-page="perf"><svg><use href="#i-pulse"/></svg>性能</button>
         <button class="nav-btn" data-page="settings"><svg><use href="#i-gear"/></svg>设置</button>
       </nav>
-      <div class="guard">
-        <svg><use href="#i-shield"/></svg>
-        <p>系统文件只统计，不删除。项目源码不会被清理。</p>
+      <div class="rail-foot">
+        <div class="guard">
+          <svg><use href="#i-shield"/></svg>
+          <p>系统文件只统计，不删除。<br/>项目源码不会被清理。</p>
+        </div>
+        <div class="rail-meta"><i></i>纯本地 · 不联网</div>
       </div>
     </aside>
 
-    <main>
+    <div class="workspace">
       <div id="jobbar" class="jobbar hidden" data-mode="indeterminate" role="status" aria-live="polite">
         <span class="spinner" aria-hidden="true"></span>
         <p id="job-text">处理中</p>
@@ -52,143 +65,175 @@
         <button id="job-cancel" class="ghost small">取消</button>
       </div>
 
-      <section id="overview" class="page">
-        <header class="page-head">
-          <div><h1>总览</h1><p class="muted">先看各盘还剩多少，再决定去哪里清理。</p></div>
-          <button class="primary" data-goto="storage">开始盘查</button>
-        </header>
-        <div id="freshness" class="freshness hidden"></div>
-        <div id="guide" class="guide"></div>
-        <div class="disk-grid" id="disk-cards"></div>
-        <div class="grid-2">
-          <article class="card">
-            <h2>占用最多的文件类型</h2>
-            <div id="category-bars"></div>
-          </article>
-          <article class="card">
-            <h2>建议</h2>
-            <div id="advice-list"></div>
-          </article>
-        </div>
-      </section>
-
-      <section id="storage" class="page hidden">
-        <header class="page-head">
-          <div><h1>存储盘查</h1><p class="muted">选盘符后开始。只读取文件信息，不会改动任何文件。</p></div>
-          <button id="scan-btn" class="primary">开始盘查</button>
-        </header>
-        <div id="freshness-storage" class="freshness hidden"></div>
-        <div class="card controls">
-          <span class="label">要盘查的盘</span>
-          <div id="drive-picks" class="chips"></div>
-          <label class="switch"><input id="dup-toggle" type="checkbox" /><span>同时查找重复文件（较慢）</span></label>
-        </div>
-        <div class="grid-2 wide-left">
-          <article class="card">
-            <div class="card-head">
-              <h2>目录占用</h2>
-              <button id="tree-back" class="ghost small hidden"><svg><use href="#i-back"/></svg>返回上一层</button>
+      <main>
+        <!-- ============================================================ 总览 -->
+        <section id="overview" class="page">
+          <header class="page-head">
+            <div>
+              <h1>总览</h1>
+              <p class="muted">先看各盘还剩多少，再决定去哪里清理。所有数字都来自本机，不上传。</p>
             </div>
-            <p id="tree-crumb" class="crumb"></p>
-            <div id="treemap" class="treemap"></div>
-            <p class="hint">点击色块进入下一层。灰色为系统目录，紫色为项目目录。</p>
-          </article>
-          <article class="card">
-            <div class="card-head">
-              <h2>发现</h2>
-              <span id="finding-count" class="muted"></span>
-            </div>
-            <div class="segmented" id="filters" role="tablist"></div>
-            <ul id="finding-list" class="finding-list"></ul>
-            <div class="card-foot">
-              <span id="selected-sum" class="muted"></span>
-              <button id="finding-run-btn">处理勾选项</button>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <section id="projects" class="page hidden">
-        <header class="page-head">
-          <div><h1>项目</h1><p class="muted">按项目里 node_modules、target 这类可重建目录的占用从大到小排列。这些目录删掉后源码还在，但重新安装或编译之前项目无法运行；排名只表示谁更占空间，不表示整个项目可删。导出给 AI 的清单只含 D、E 盘的项目。</p></div>
-          <button id="export-btn" class="primary"><svg><use href="#i-export"/></svg>导出给 AI</button>
-        </header>
-        <div id="export-result"></div>
-        <div class="grid-2 wide-left">
-          <article class="card">
-            <div class="card-head">
-              <h2>项目列表</h2>
-              <select id="project-sort" aria-label="排序方式">
-                <option value="regen">按可重建目录占用</option>
-                <option value="size">按总大小</option>
-                <option value="idle">按闲置天数</option>
-              </select>
-            </div>
-            <ul id="project-list" class="project-list"></ul>
-            <p class="hint">条形图深色是源码等其他内容，浅色是可重建目录。</p>
-          </article>
-          <article class="card" id="project-detail"></article>
-        </div>
-      </section>
-
-      <section id="clean" class="page hidden">
-        <header class="page-head">
-          <div><h1>清理</h1><p class="muted">只清理能自动重新生成的缓存。这些文件直接删除，不进回收站。右侧大小是最多能释放的量，被占用或受保护的文件会跳过，实际可能略少。</p></div>
-          <button id="cache-run-btn" class="primary icon-btn" title="清理勾选的缓存" aria-label="清理勾选的缓存"><svg><use href="#i-broom"/></svg></button>
-        </header>
-        <div id="clean-result" class="hidden"></div>
-        <article class="card">
-          <div class="card-head">
-            <h2>已知缓存</h2>
-            <div class="head-actions">
-              <span id="cache-sum" class="muted"></span>
-              <button id="cache-scan-btn" class="ghost icon-btn small" title="重新扫描" aria-label="重新扫描"><svg><use href="#i-refresh"/></svg></button>
-            </div>
+            <button class="primary" data-goto="storage"><svg><use href="#i-scan"/></svg>开始盘查</button>
+          </header>
+          <div id="freshness" class="freshness hidden"></div>
+          <div id="overview-stats" class="stat-row"></div>
+          <div id="guide" class="guide"></div>
+          <div class="disk-grid" id="disk-cards"></div>
+          <div class="grid-2">
+            <article class="card">
+              <div class="card-head"><h2>占用最多的文件类型</h2><span class="muted" id="category-note"></span></div>
+              <div id="category-bars"></div>
+            </article>
+            <article class="card">
+              <div class="card-head"><h2>建议</h2></div>
+              <div id="advice-list"></div>
+            </article>
           </div>
-          <ul id="cache-list" class="finding-list"></ul>
-        </article>
-      </section>
+        </section>
 
-      <section id="perf" class="page hidden">
-        <header class="page-head">
-          <div><h1>性能</h1><p class="muted">看哪些程序占内存。系统关键进程不能结束。</p></div>
-          <button id="proc-refresh" class="primary">刷新</button>
-        </header>
-        <div class="disk-grid" id="perf-metrics"></div>
-        <div id="memory-advice"></div>
-        <article class="card">
-          <div class="card-head"><h2>进程</h2><button id="proc-kill" class="danger-ghost">结束勾选的进程</button></div>
-          <table class="table">
-            <thead><tr><th></th><th>进程</th><th class="num">CPU</th><th class="num">内存</th><th>可结束</th></tr></thead>
-            <tbody id="proc-rows"></tbody>
-          </table>
-        </article>
-      </section>
+        <!-- ============================================================ 存储盘查 -->
+        <section id="storage" class="page hidden">
+          <header class="page-head">
+            <div>
+              <h1>存储盘查<span class="page-meta">只读扫描</span></h1>
+              <p class="muted">选盘符后开始。只读取文件信息，不会改动任何文件。系统目录与项目目录只统计。</p>
+            </div>
+            <button id="scan-btn" class="primary"><svg><use href="#i-scan"/></svg>开始盘查</button>
+          </header>
+          <div id="freshness-storage" class="freshness hidden"></div>
+          <div class="card controls">
+            <span class="label">盘符</span>
+            <div id="drive-picks" class="chips"></div>
+            <label class="switch"><input id="dup-toggle" type="checkbox" /><span>同时查找重复文件（较慢）</span></label>
+          </div>
+          <div class="grid-2 wide-left">
+            <article class="card">
+              <div class="card-head">
+                <h2>目录占用</h2>
+                <button id="tree-back" class="ghost small hidden"><svg><use href="#i-back"/></svg>返回上一层</button>
+              </div>
+              <p id="tree-crumb" class="crumb"></p>
+              <div id="treemap" class="treemap"></div>
+              <div class="legend">
+                <span><b class="normal"></b>普通目录</span>
+                <span><b class="system"></b>系统目录（只读）</span>
+                <span><b class="project"></b>项目目录（保护）</span>
+                <span class="muted">点击色块进入下一层</span>
+              </div>
+            </article>
+            <article class="card">
+              <div class="card-head">
+                <h2>发现</h2>
+                <span id="finding-count" class="muted"></span>
+              </div>
+              <div class="segmented" id="filters" role="tablist"></div>
+              <ul id="finding-list" class="finding-list"></ul>
+              <div class="card-foot">
+                <span id="selected-sum" class="muted">没有勾选</span>
+                <button id="finding-run-btn" class="primary" disabled>处理勾选项</button>
+              </div>
+            </article>
+          </div>
+        </section>
 
-      <section id="settings" class="page hidden">
-        <header class="page-head">
-          <div><h1>设置</h1><p class="muted">这里加的路径和进程，任何清理都不会碰。</p></div>
-          <button id="save-settings" class="primary">保存</button>
-        </header>
-        <div class="grid-2">
+        <!-- ============================================================ 项目 -->
+        <section id="projects" class="page hidden">
+          <header class="page-head">
+            <div>
+              <h1>项目<span class="page-meta">可重建目录</span></h1>
+              <p class="muted">按项目里 node_modules、target 这类可重建目录的占用从大到小排列。这些目录删掉后源码还在，但重新安装或编译之前项目无法运行；排名只表示谁更占空间，不表示整个项目可删。导出给 AI 的清单只含 D、E 盘的项目。</p>
+            </div>
+            <button id="export-btn" class="primary"><svg><use href="#i-export"/></svg>导出给 AI</button>
+          </header>
+          <div id="export-result"></div>
+          <div class="grid-2 wide-left">
+            <article class="card">
+              <div class="card-head">
+                <h2>项目列表</h2>
+                <select id="project-sort" aria-label="排序方式">
+                  <option value="regen">按可重建目录占用</option>
+                  <option value="size">按总大小</option>
+                  <option value="idle">按闲置天数</option>
+                </select>
+              </div>
+              <ul id="project-list" class="project-list"></ul>
+              <p class="hint">条形图深色是源码等其他内容，浅色是可重建目录。</p>
+            </article>
+            <article class="card" id="project-detail"></article>
+          </div>
+        </section>
+
+        <!-- ============================================================ 清理 -->
+        <section id="clean" class="page hidden">
+          <header class="page-head">
+            <div>
+              <h1>清理<span class="page-meta">可再生缓存</span></h1>
+              <p class="muted">只清理能自动重新生成的缓存。这些文件直接删除，不进回收站。下方大小是最多能释放的量，被占用或受保护的文件会跳过，实际可能略少。</p>
+            </div>
+            <button id="cache-run-btn" class="primary" disabled><svg><use href="#i-broom"/></svg>清理勾选</button>
+          </header>
+          <div id="clean-result" class="hidden"></div>
           <article class="card">
-            <h2>受保护路径</h2>
-            <p class="hint">每行一个文件夹。</p>
-            <textarea id="protected-paths" rows="5" spellcheck="false"></textarea>
-            <h2 class="gap">进程白名单</h2>
-            <p class="hint">每行一个进程名，例如 code.exe。</p>
-            <textarea id="proc-whitelist" rows="4" spellcheck="false"></textarea>
+            <div class="card-head">
+              <h2>已知缓存</h2>
+              <div class="head-actions">
+                <span id="cache-sum" class="muted"></span>
+                <button id="cache-scan-btn" class="ghost icon-btn small" title="重新扫描" aria-label="重新扫描"><svg><use href="#i-refresh"/></svg></button>
+              </div>
+            </div>
+            <ul id="cache-list" class="finding-list"></ul>
           </article>
+        </section>
+
+        <!-- ============================================================ 性能 -->
+        <section id="perf" class="page hidden">
+          <header class="page-head">
+            <div>
+              <h1>性能</h1>
+              <p class="muted">看哪些程序占内存。系统关键进程不能结束。</p>
+            </div>
+            <button id="proc-refresh" class="primary"><svg><use href="#i-refresh"/></svg>刷新</button>
+          </header>
+          <div class="disk-grid" id="perf-metrics"></div>
+          <div id="memory-advice"></div>
           <article class="card">
-            <h2>快捷方式</h2>
-            <p class="hint">在桌面和开始菜单放一个带图标的入口。</p>
-            <button id="shortcut-btn">创建快捷方式</button>
-            <h2 class="gap">历史</h2>
-            <ul id="history" class="history"></ul>
+            <div class="card-head"><h2>进程</h2><button id="proc-kill" class="danger-ghost">结束勾选的进程</button></div>
+            <table class="table">
+              <thead><tr><th></th><th>进程</th><th class="num">CPU</th><th class="num">内存</th><th>可结束</th></tr></thead>
+              <tbody id="proc-rows"></tbody>
+            </table>
           </article>
-        </div>
-      </section>
-    </main>
+        </section>
+
+        <!-- ============================================================ 设置 -->
+        <section id="settings" class="page hidden">
+          <header class="page-head">
+            <div>
+              <h1>设置</h1>
+              <p class="muted">这里加的路径和进程，任何清理都不会碰。</p>
+            </div>
+            <button id="save-settings" class="primary">保存</button>
+          </header>
+          <div class="grid-2">
+            <article class="card">
+              <h2>受保护路径</h2>
+              <p class="hint">每行一个文件夹。</p>
+              <textarea id="protected-paths" rows="5" spellcheck="false"></textarea>
+              <h2 class="gap">进程白名单</h2>
+              <p class="hint">每行一个进程名，例如 code.exe。</p>
+              <textarea id="proc-whitelist" rows="4" spellcheck="false"></textarea>
+            </article>
+            <article class="card">
+              <h2>快捷方式</h2>
+              <p class="hint">在桌面和开始菜单放一个带图标的入口。</p>
+              <button id="shortcut-btn"><svg><use href="#i-export"/></svg>创建快捷方式</button>
+              <h2 class="gap">历史</h2>
+              <ul id="history" class="history"></ul>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
   </div>
 
   <dialog id="confirm">

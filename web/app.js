@@ -111,13 +111,14 @@ function show(page) {
 // ---------------------------------------------------------------- overview
 function renderOverview() {
   renderFreshness();
+  renderStats();
   const steps = [
     { done: state.scanned, title: "盘查", body: "到「存储盘查」选盘符，看每个盘存了什么。" },
     { done: state.findings.some((item) => item.selectable && item.selected) || false, title: "勾选处理", body: "缓存直接清理，安装包和重复文件进回收站。" },
     { done: state.exported, title: "交给 AI", body: "在「项目」导出 D、E 盘项目里的可重建目录清单，让 agent 核对后处理。" },
   ];
   $("guide").innerHTML = steps.map((step, index) => `
-    <div class="step ${step.done ? "done" : ""}"><b>${step.done ? "✓" : index + 1}</b><div><strong>${esc(step.title)}</strong><span>${esc(step.body)}</span></div></div>`).join("");
+    <div class="step ${step.done ? "done" : ""}"><b>${step.done ? "✓" : String(index + 1).padStart(2, "0")}</b><div><strong>${esc(step.title)}</strong><span>${esc(step.body)}</span></div></div>`).join("");
 
   $("disk-cards").innerHTML = state.disks.map(diskCard).join("") || empty("没有读到磁盘", "请稍后重试。");
 
@@ -125,12 +126,31 @@ function renderOverview() {
   const max = entries.length ? entries[0][1] : 1;
   $("category-bars").innerHTML = entries.length
     ? `<div class="bars">${entries.map(([name, size]) => `
-        <div class="bar-row"><span>${esc(name)}</span><div class="meter"><span style="width:${(size / max * 100).toFixed(1)}%"></span></div><span class="val">${bytes(size)}</span></div>`).join("")}</div>`
+        <div class="bar-row"><span title="${esc(name)}">${esc(name)}</span><div class="meter"><span style="width:${(size / max * 100).toFixed(1)}%"></span></div><span class="val">${bytes(size)}</span></div>`).join("")}</div>`
     : empty("还没有盘查", "盘查之后，这里会列出视频、压缩包、程序等各占多少。");
+  $("category-note").textContent = entries.length ? `Top ${entries.length}` : "";
 
   const advice = state.advice.length ? state.advice : (state.tips || []).map((tip) => ({ title: "提示", detail: tip, severity: "info" }));
   $("advice-list").innerHTML = advice.map((item) => `
     <div class="advice ${esc(item.severity)}"><div><strong>${esc(item.title)}</strong><span>${esc(item.detail)}</span></div></div>`).join("") || empty("暂无建议", "盘查后会给出每个盘的建议。");
+}
+
+// Four headline figures: what can actually be reclaimed, not marketing numbers.
+function renderStats() {
+  const host = $("overview-stats");
+  if (!host) return;
+  const selectable = state.findings.filter((item) => item.selectable);
+  const clean = selectable.filter((item) => item.action === "cache_clean").reduce((sum, item) => sum + Number(item.size || 0), 0);
+  const recycle = selectable.filter((item) => item.action === "recycle_suggest").reduce((sum, item) => sum + Number(item.size || 0), 0);
+  const regen = state.projects.reduce((sum, project) => sum + Object.values(project.regenerable || {}).reduce((a, b) => a + b, 0), 0);
+  const tiles = [
+    { tone: "clean", k: "可直接清理", v: bytes(clean), s: clean ? "缓存类，删除后会自动重建" : "暂无可直接清理项" },
+    { tone: "recycle", k: "可进回收站", v: bytes(recycle), s: recycle ? "可撤销，逐项确认后执行" : "安装包、重复文件会出现在这里" },
+    { tone: "regen", k: "可重建目录", v: bytes(regen), s: regen ? "node_modules、target 等" : "盘查项目后统计" },
+    { tone: "count", k: "发现", v: String(state.findings.length), s: state.scanned ? "条盘查结论待处理" : "等待首次盘查" },
+  ];
+  host.innerHTML = tiles.map((tile) => `
+    <article class="stat" data-tone="${tile.tone}"><div class="k">${esc(tile.k)}</div><div class="v">${esc(tile.v)}</div><div class="s">${esc(tile.s)}</div></article>`).join("");
 }
 
 const STALE_DAYS = 7;
@@ -171,11 +191,14 @@ async function rescan() {
 }
 
 function diskCard(disk) {
-  const level = disk.percent >= 90 ? "danger" : disk.percent >= 80 ? "warn" : "";
+  const pct = Math.max(0, Math.min(100, Number(disk.percent) || 0));
+  const level = pct >= 90 ? "danger" : pct >= 80 ? "warn" : "";
+  const stateText = pct >= 90 ? "空间告急" : pct >= 80 ? "偏紧" : "充足";
   return `<article class="disk">
-    <div class="disk-top"><span class="disk-letter">${esc(disk.drive)}: 盘</span><span class="muted">${esc(disk.percent)}% 已用</span></div>
-    <div class="disk-free">${esc(disk.free_gb)} GB<small>可用 / 共 ${esc(disk.total_gb)} GB</small></div>
-    <div class="meter ${level}"><span style="width:${Number(disk.percent) || 0}%"></span></div>
+    <div class="disk-top"><span class="disk-letter">${esc(disk.drive)}:</span><span class="disk-state" data-level="${level}"><i></i>${stateText}</span></div>
+    <div class="disk-free">${esc(disk.free_gb)}<small>GB 可用 / 共 ${esc(disk.total_gb)} GB</small></div>
+    <div class="meter ${level}"><span style="width:${pct}%"></span></div>
+    <div class="disk-legend"><span>已用 ${pct}%</span><span>${esc(disk.used_gb)} GB 已用</span></div>
   </article>`;
 }
 
@@ -198,7 +221,7 @@ function renderStorage() {
   renderTree();
   const filters = ["all", "cache_clean", "recycle_suggest", "advice_only", "readonly"];
   const counts = Object.fromEntries(filters.map((key) => [key, key === "all" ? state.findings.length : state.findings.filter((item) => item.action === key).length]));
-  $("filters").innerHTML = filters.map((key) => `<button role="tab" aria-selected="${state.filter === key}" class="${state.filter === key ? "active" : ""}" data-filter="${key}">${key === "all" ? "全部" : ACTION_TEXT[key]} ${counts[key]}</button>`).join("");
+  $("filters").innerHTML = filters.map((key) => `<button role="tab" aria-selected="${state.filter === key}" class="${state.filter === key ? "active" : ""}" data-filter="${key}">${key === "all" ? "全部" : ACTION_TEXT[key]}<span class="count">${counts[key]}</span></button>`).join("");
   $("filters").querySelectorAll("button").forEach((button) => { button.onclick = () => { state.filter = button.dataset.filter; renderStorage(); }; });
 
   const rows = state.findings.filter((item) => state.filter === "all" || item.action === state.filter).sort((a, b) => b.size - a.size);
@@ -218,12 +241,12 @@ function findingRow(item) {
   const control = item.selectable
     ? `<input type="checkbox" data-id="${esc(item.id)}" ${item.selected ? "checked" : ""} aria-label="勾选 ${esc(item.label)}"/>`
     : `<svg class="lock" aria-label="不可执行"><use href="#i-shield"/></svg>`;
-  return `<li class="finding">
+  return `<li class="finding" data-action="${esc(item.action)}">
     ${control}
     <div>
       <div class="finding-title"><strong>${esc(item.label)}</strong><span class="badge ${esc(item.action)}">${esc(ACTION_TEXT[item.action] || item.action)}</span></div>
       <p>${esc(item.reason)} ${esc(item.suggestion)}</p>
-      <div class="path">${esc(item.path)}</div>
+      <div class="path" title="${esc(item.path)}">${esc(item.path)}</div>
     </div>
     <span class="size">${bytes(item.size)}</span>
   </li>`;
@@ -231,7 +254,9 @@ function findingRow(item) {
 
 function updateSelectedSum() {
   const chosen = state.findings.filter((item) => item.selectable && item.selected);
-  $("selected-sum").textContent = chosen.length ? `已勾选 ${chosen.length} 项，约 ${bytes(chosen.reduce((sum, item) => sum + item.size, 0))}` : "没有勾选";
+  const sum = $("selected-sum");
+  sum.textContent = chosen.length ? `已勾选 ${chosen.length} 项 · ${bytes(chosen.reduce((total, item) => total + item.size, 0))}` : "没有勾选";
+  sum.classList.toggle("strong", chosen.length > 0);
   $("finding-run-btn").disabled = state.busy || !chosen.length;
 }
 
@@ -263,15 +288,33 @@ function renderTree() {
   if (host.dataset.signature === signature && host.firstElementChild) return;
   host.dataset.signature = signature;
   const rects = layoutTreemap(items, 0, 0, width, height);
-  const palette = ["#3b5bdb", "#1c7ed6", "#0c8599", "#2b8a3e", "#e67700", "#5f3dc4", "#c2255c", "#495057"];
-  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="目录占用图">${rects.map((rect, order) => {
-    const fill = rect.protected === "system" ? "#868e96" : rect.protected === "project" ? "#7048e8" : palette[order % palette.length];
-    const label = rect.w > 80 && rect.h > 40;
-    return `<g data-index="${rect.index}"><title>${esc(rect.name)} ${bytes(rect.size)}</title>
-      <rect x="${rect.x + 1}" y="${rect.y + 1}" width="${Math.max(rect.w - 2, 0)}" height="${Math.max(rect.h - 2, 0)}" rx="6" fill="${fill}"></rect>
-      ${label ? `<text x="${rect.x + 10}" y="${rect.y + 22}">${esc(truncate(rect.name, rect.w))}</text><text class="sub" x="${rect.x + 10}" y="${rect.y + 38}">${bytes(rect.size)}</text>` : ""}
-    </g>`;
-  }).join("")}</svg>`;
+  const palette = ["#6b655a", "#8f8577", "#b3a893", "#7a5f48", "#a8763f", "#5c574d", "#9c8f7a", "#4f4a42"];
+  // The treemap is an "occupancy chart", not a rainbow: system and project trees get
+  // distinct SVG patterns so the two protected kinds stay readable for colour-blind users.
+  host.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="目录占用图">
+    <defs>
+      <pattern id="hatch-system" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect width="6" height="6" fill="#4f4a42"></rect>
+        <line x1="0" y1="0" x2="0" y2="6" stroke="#6b655a" stroke-width="2"></line>
+      </pattern>
+      <pattern id="hatch-project" width="6" height="6" patternUnits="userSpaceOnUse">
+        <rect width="6" height="6" fill="#7a5f48"></rect>
+        <circle cx="3" cy="3" r="1.1" fill="#a8907a"></circle>
+      </pattern>
+    </defs>
+    ${rects.map((rect, order) => {
+      const fill = rect.protected === "system" ? "url(#hatch-system)" : rect.protected === "project" ? "url(#hatch-project)" : palette[order % palette.length];
+      const roomy = rect.w > 96 && rect.h > 46;
+      const narrow = !roomy && rect.w > 62 && rect.h > 30;
+      return `<g data-index="${rect.index}"><title>${esc(rect.name)} ${bytes(rect.size)}</title>
+        <rect x="${rect.x + 2}" y="${rect.y + 2}" width="${Math.max(rect.w - 4, 0)}" height="${Math.max(rect.h - 4, 0)}" rx="3" fill="${fill}" stroke="rgba(255,255,255,0.10)"></rect>
+        ${roomy
+          ? `<text x="${rect.x + 10}" y="${rect.y + 22}">${esc(truncate(rect.name, rect.w))}</text><text class="sub" x="${rect.x + 10}" y="${rect.y + 37}">${bytes(rect.size)}</text>`
+          : narrow
+            ? `<text class="sub" x="${rect.x + 8}" y="${rect.y + 18}">${bytes(rect.size)}</text>`
+            : ""}
+      </g>`;
+    }).join("")}</svg>`;
   host.querySelectorAll("g[data-index]").forEach((group) => {
     group.onclick = () => {
       const index = Number(group.dataset.index);
@@ -386,7 +429,7 @@ function renderCaches() {
     const control = item.level === "safe"
       ? `<input type="checkbox" data-id="${esc(item.id)}" ${item.selected ? "checked" : ""} aria-label="勾选 ${esc(item.label)}"/>`
       : `<svg class="lock" aria-label="不可执行"><use href="#i-shield"/></svg>`;
-    return `<li class="finding">${control}<div><div class="finding-title"><strong>${esc(item.label)}</strong><span class="badge ${action}">${esc(ACTION_TEXT[action])}</span></div><p>${esc(item.description)}</p></div><span class="size">${bytes(item.size)}</span></li>`;
+    return `<li class="finding" data-action="${action}">${control}<div><div class="finding-title"><strong>${esc(item.label)}</strong><span class="badge ${action}">${esc(ACTION_TEXT[action])}</span></div><p>${esc(item.description)}</p></div><span class="size">${bytes(item.size)}</span></li>`;
   }).join("") : empty(state.busy ? "正在扫描缓存" : "还没有缓存数据", state.busy ? "大小统计完成后会自动出现。" : "点右上角的刷新按钮重新扫描。");
   $("cache-list").querySelectorAll("input[data-id]").forEach((box) => {
     box.onchange = () => {
@@ -433,12 +476,15 @@ async function startCacheScan() {
 async function refreshProcesses() {
   const payload = await api().get_processes();
   const snap = payload.snapshot || {};
+  const processes = snap.processes || [];
+  const hot = processes.filter((proc) => proc.suspicious).length;
   $("perf-metrics").innerHTML = [
     { label: "CPU", value: `${Number(snap.cpu_percent || 0).toFixed(0)}%`, pct: snap.cpu_percent },
     { label: "内存", value: `${Number(snap.memory_percent || 0).toFixed(0)}%`, pct: snap.memory_percent, sub: `${snap.memory_used_gb ?? 0} / ${snap.memory_total_gb ?? 0} GB` },
-  ].map((item) => `<article class="disk"><div class="disk-top"><span class="disk-letter">${item.label}</span><span class="muted">${esc(item.sub || "")}</span></div><div class="disk-free">${item.value}</div><div class="meter ${item.pct >= 90 ? "danger" : item.pct >= 75 ? "warn" : ""}"><span style="width:${Number(item.pct) || 0}%"></span></div></article>`).join("");
+    { label: "进程", value: String(processes.length), pct: null, sub: hot ? `${hot} 个占用偏高` : "运行中" },
+  ].map((item) => `<article class="disk"><div class="disk-top"><span class="disk-letter">${item.label}</span><span class="muted">${esc(item.sub || "")}</span></div><div class="disk-free">${item.value}</div>${typeof item.pct === "number" ? `<div class="meter ${item.pct >= 90 ? "danger" : item.pct >= 75 ? "warn" : ""}"><span style="width:${Number(item.pct) || 0}%"></span></div>` : ""}</article>`).join("");
   $("memory-advice").innerHTML = (payload.advice || []).slice(0, 3).map((item) => `<div class="advice ${esc(item.severity)}"><div><strong>${esc(item.title)}</strong><span>${esc(item.detail)}</span></div></div>`).join("");
-  $("proc-rows").innerHTML = (snap.processes || []).map((proc) => `<tr>
+  $("proc-rows").innerHTML = processes.map((proc) => `<tr>
     <td>${proc.can_kill ? `<input type="checkbox" data-pid="${esc(proc.pid)}" aria-label="勾选 ${esc(proc.name)}"/>` : ""}</td>
     <td>${esc(proc.name)}${proc.suspicious ? ' <span class="badge medium">占用偏高</span>' : ""}</td>
     <td class="num">${Number(proc.cpu_percent).toFixed(1)}%</td>
@@ -592,7 +638,7 @@ window.addEventListener("resize", () => { clearTimeout(renderTree.timer); render
 
 async function boot() {
   const version = await api().get_version();
-  if (version) $("version").textContent = "本地存储盘查 v" + version;
+  if (version) $("version").textContent = "v" + version;
   await refreshDisks();
   renderDrivePicks();
   const cached = await api().load_cached();
