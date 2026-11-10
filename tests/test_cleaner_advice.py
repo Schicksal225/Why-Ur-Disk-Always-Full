@@ -99,6 +99,9 @@ def test_deep_tree_is_cleaned_without_recursion_error(tmp_path: Path, monkeypatc
     # A recursive os.walk aborts at ~1000 nested directories with RecursionError,
     # which made "clean" fail on a temp folder that held such a tree.
     monkeypatch.setattr("core.cleaner.is_safe_delete_target", lambda *_args, **_kwargs: True)
+    # Empty-dir pruning is gated on project protection; the temporary folder is
+    # not a cache root, so lift the gate to observe the pruning itself.
+    monkeypatch.setattr("core.cleaner.is_path_protected", lambda *_args, **_kwargs: False)
     root = tmp_path / "deep"
     current = root
     try:
@@ -114,7 +117,7 @@ def test_deep_tree_is_cleaned_without_recursion_error(tmp_path: Path, monkeypatc
 
     assert result.errors == []
     assert (result.freed_bytes, result.files_removed, result.skipped) == (0, 0, 0)
-    assert not root.exists()
+    assert not list(root.iterdir())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows-only")

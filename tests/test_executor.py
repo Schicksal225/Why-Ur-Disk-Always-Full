@@ -126,21 +126,15 @@ def test_recycle_refuses_when_bin_is_disabled(tmp_path: Path):
     assert "关闭回收站" in results[0].message
 
 
-def test_cache_clean_rejects_path_outside_whitelist():
-    root = Path(os.environ["USERPROFILE"]) / "PCOptimizerAuditTest"
-    root.mkdir(exist_ok=True)
+def test_cache_clean_rejects_path_outside_whitelist(tmp_path: Path):
+    root = tmp_path / "PCOptimizerAuditTest"
+    root.mkdir()
     target = root / "a.tmp"
     target.write_text("x", encoding="utf-8")
-    try:
-        results = execute_findings(
-            [_finding(str(root), "cache_clean", size=1)],
-            protected_paths=[],
-            dry_run=False,
-        )
-        assert target.exists()
-        assert results[0].ok is False
-    finally:
-        if target.exists():
-            target.unlink()
-        if root.exists():
-            root.rmdir()
+    results = execute_findings(
+        [_finding(str(root), "cache_clean", size=1)],
+        protected_paths=[],
+        dry_run=False,
+    )
+    assert target.exists()
+    assert results[0].ok is False
