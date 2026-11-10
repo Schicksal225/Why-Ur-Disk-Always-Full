@@ -10,19 +10,30 @@ of a scanned tree.
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 import time
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.advisor import build_drive_advice
 from core.cleaner import get_disk_usage
-from core.classifier import Finding
+from core.classifier import Finding, classify_scan, findings_from_duplicates
+from core.duplicates import find_duplicates
 from core.executor import execute_findings, recycle_block_reason
 from core.handoff import export_handoff, restore_command
 from core.paths import get_data_dir
+from core.projects import finalize_projects
 from core.safety import deletion_allowed, is_cache_clean_path
-from core.scanner import load_audit_cache
+from core.scanner import (
+    load_audit_cache,
+    result_to_dict,
+    save_audit_cache,
+    scan_path,
+)
 from core.store import Store
 
 # A cached scan older than this is reported as stale so agents can suggest a
@@ -685,6 +696,228 @@ def _handoff_export(args: dict[str, Any]) -> str:
     )
 
 
+# ---------------------------------------------------------------- P3 scan jobs
+SCAN_TOOL_NAMES = frozenset({"scan_start", "scan_status"})
+DEFAULT_SCAN_TIMEOUT = 120
+MIN_SCAN_TIMEOUT = 1
+MAX_SCAN_TIMEOUT = 300
+SCAN_LOCK_MAX_AGE = MAX_SCAN_TIMEOUT + 120
+
+
+@dataclass
+class _ScanJob:
+    job_id: str
+    drives: list[str]
+    duplicates: bool
+    timeout_seconds: int
+    started: float
+    state: str = "running"
+    current: str = ""
+    message: str = ""
+    drives_done: int = 0
+    findings: int = 0
+    projects: int = 0
+    cache_saved: bool = False
+    error: str = ""
+    timed_out: bool = False
+    cancel: threading.Event = field(default_factory=threading.Event)
+
+
+_SCAN_LOCK = threading.Lock()
+_SCAN_JOB: _ScanJob | None = None
+
+
+def _scan_lock_path() -> Path:
+    return get_data_dir() / "mcp_scan.lock"
+
+
+def _release_scan_lock() -> None:
+    try:
+        _scan_lock_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _finding_objects(rows: list[dict]) -> list[Finding]:
+    return [
+        Finding(**{key: row.get(key) for key in Finding.__dataclass_fields__ if key in row})
+        for row in rows
+    ]
+
+
+def _run_scan_job(job: _ScanJob) -> None:
+    """Scan the requested drives in the background; the process stays read-only
+    apart from writing the audit cache on success."""
+    try:
+        results = []
+        findings: list[dict] = []
+        categories: dict[str, int] = {}
+        projects: list[dict] = []
+        for index, drive in enumerate(job.drives, 1):
+            if job.cancel.is_set():
+                break
+            job.current = f"{drive}:\\"
+
+            def progress(message: str, drive: str = drive) -> None:
+                job.message = f"{drive}:\\ {message}"
+                if time.monotonic() - job.started > job.timeout_seconds:
+                    job.timed_out = True
+                    job.cancel.set()
+
+            result = scan_path(
+                f"{drive}:\\",
+                cancel=job.cancel,
+                progress=progress,
+                collect_duplicates=job.duplicates,
+            )
+            results.append(result)
+            findings.extend(asdict(item) for item in classify_scan(result))
+            projects.extend(result.projects)
+            for name, size in result.categories.items():
+                categories[name] = categories.get(name, 0) + int(size)
+            if job.duplicates and result.dup_candidates and not job.cancel.is_set():
+                findings.extend(
+                    asdict(item) for item in findings_from_duplicates(find_duplicates(result.dup_candidates))
+                )
+            job.drives_done = index
+            if job.cancel.is_set():
+                break
+        if job.cancel.is_set():
+            job.state = "timeout" if job.timed_out else "cancelled"
+            return
+        projects = finalize_projects(projects)
+        advice = [
+            asdict(item)
+            for item in build_drive_advice(get_disk_usage(), _finding_objects(findings), categories)
+        ]
+        save_audit_cache(
+            {
+                "results": [result_to_dict(item) for item in results],
+                "findings": findings,
+                "projects": projects,
+                "advice": advice,
+                "categories": categories,
+            }
+        )
+        job.findings = len(findings)
+        job.projects = len(projects)
+        job.cache_saved = True
+        _release_scan_lock()
+        job.state = "done"
+    except Exception as exc:  # noqa: BLE001 - surfaced through scan_status
+        job.state = "error"
+        job.error = f"{type(exc).__name__}: {exc}"
+    finally:
+        _release_scan_lock()
+
+
+def _scan_start(args: dict[str, Any]) -> str:
+    _reject_unknown(args, {"drives", "duplicates", "timeout_seconds"})
+    raw_drives = args.get("drives")
+    if not isinstance(raw_drives, list) or not raw_drives:
+        raise ToolError("drives must be a non-empty array of drive letters")
+    drives: list[str] = []
+    for item in raw_drives:
+        drive = _drive_arg(item, required=True)
+        if drive not in drives:
+            drives.append(drive)
+    for drive in drives:
+        if not Path(f"{drive}:\\").exists():
+            raise ToolError(f"drive {drive}: is not available on this machine")
+    duplicates = _bool_arg(args, "duplicates", False)
+    timeout_seconds = _int_arg(
+        args, "timeout_seconds", DEFAULT_SCAN_TIMEOUT, MIN_SCAN_TIMEOUT, MAX_SCAN_TIMEOUT
+    )
+
+    global _SCAN_JOB
+    with _SCAN_LOCK:
+        if _SCAN_JOB is not None and _SCAN_JOB.state == "running":
+            raise ToolError(f"a scan is already running: {_SCAN_JOB.job_id}")
+        lock = _scan_lock_path()
+        try:
+            lock.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ToolError(f"cannot prepare the scan lock: {exc}") from exc
+        if lock.exists():
+            try:
+                age = time.time() - lock.stat().st_mtime
+            except OSError:
+                age = 0.0
+            if age > SCAN_LOCK_MAX_AGE:
+                try:
+                    lock.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        try:
+            handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            raise ToolError(
+                "another PC Optimizer process is already scanning (mcp_scan.lock)"
+            ) from None
+        except OSError as exc:
+            raise ToolError(f"cannot create the scan lock: {exc}") from exc
+        job_id = "scan-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            os.write(handle, (job_id + "\n").encode("utf-8"))
+        finally:
+            os.close(handle)
+
+        job = _ScanJob(
+            job_id=job_id,
+            drives=drives,
+            duplicates=duplicates,
+            timeout_seconds=timeout_seconds,
+            started=time.monotonic(),
+        )
+        _SCAN_JOB = job
+        thread = threading.Thread(target=_run_scan_job, args=(job,), name="pcopt-mcp-scan", daemon=True)
+        thread.start()
+
+    return json.dumps(
+        {
+            "job_id": job.job_id,
+            "state": "running",
+            "drives": drives,
+            "duplicates": duplicates,
+            "timeout_seconds": timeout_seconds,
+            "note": "盘查在后台进行，完成后结果写入 scan_cache.json；用 scan_status 轮询。",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _scan_status(args: dict[str, Any]) -> str:
+    _reject_unknown(args, {"job_id"})
+    job_id = _string_arg(args, "job_id", required=False)
+    with _SCAN_LOCK:
+        job = _SCAN_JOB
+        if job is None:
+            raise ToolError("no scan has been started in this MCP session")
+        if job_id is not None and job_id != job.job_id:
+            raise ToolError(f"unknown job_id: {job_id}")
+        drives_total = len(job.drives) or 1
+        payload: dict[str, Any] = {
+            "job_id": job.job_id,
+            "state": job.state,
+            "drives": list(job.drives),
+            "duplicates": job.duplicates,
+            "timeout_seconds": job.timeout_seconds,
+            "elapsed_seconds": round(time.monotonic() - job.started, 1),
+            "drives_done": job.drives_done,
+            "progress_percent": round(job.drives_done * 100 / drives_total),
+            "current": job.current,
+            "message": job.message,
+            "findings": job.findings,
+            "projects": job.projects,
+            "cache_saved": job.cache_saved,
+        }
+        if job.error:
+            payload["error"] = job.error
+        if job.state in ("done", "timeout", "cancelled", "error"):
+            payload["note"] = "任务已结束；findings_query 可用 cache_saved=true 的新缓存。"
+        return json.dumps(payload, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------- registry
 _HANDLERS: dict[str, Any] = {
     "drives_list": _drives_list,
@@ -693,6 +926,8 @@ _HANDLERS: dict[str, Any] = {
     "projects_list": _projects_list,
     "cleanup_plan": _cleanup_plan,
     "handoff_export": _handoff_export,
+    "scan_start": _scan_start,
+    "scan_status": _scan_status,
 }
 
 _ADDITIONAL_PROPERTIES_FALSE = {
@@ -861,6 +1096,59 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "minLength": 1,
                     "description": "Relative subdirectory under exports (optional).",
+                }
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "scan_start",
+        "description": (
+            "Start a background disk scan (the same scan the GUI runs) and write "
+            "the result to the audit cache. Only available when the server is "
+            "started with --mcp-allow-scan. One scan at a time; timeout_seconds "
+            "cancels a long scan and returns partial state through scan_status. "
+            "It never deletes or modifies scanned files."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "drives": {
+                    "type": "array",
+                    "items": {"type": "string", "pattern": "^[A-Za-z]$"},
+                    "minItems": 1,
+                    "description": "Drive letters to scan.",
+                },
+                "duplicates": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Also look for duplicate files (slower).",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": MIN_SCAN_TIMEOUT,
+                    "maximum": MAX_SCAN_TIMEOUT,
+                    "default": DEFAULT_SCAN_TIMEOUT,
+                },
+            },
+            "required": ["drives"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "scan_status",
+        "description": (
+            "Poll the background scan started by scan_start: state, progress, "
+            "current path, findings/project counts and whether the audit cache "
+            "was updated. Only available when the server is started with "
+            "--mcp-allow-scan."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "Job id; defaults to the most recent scan.",
                 }
             },
             "additionalProperties": False,

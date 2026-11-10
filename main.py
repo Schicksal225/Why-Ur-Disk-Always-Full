@@ -20,7 +20,12 @@ def main() -> None:
     if "--mcp" in sys.argv:
         from core.mcp_server import serve
 
-        raise SystemExit(serve(log_path=get_data_dir() / "mcp.log"))
+        raise SystemExit(
+            serve(
+                log_path=get_data_dir() / "mcp.log",
+                allow_scan="--mcp-allow-scan" in sys.argv,
+            )
+        )
     if os.name == "nt" and not webview2_available():
         ctypes.windll.user32.MessageBoxW(
             None,

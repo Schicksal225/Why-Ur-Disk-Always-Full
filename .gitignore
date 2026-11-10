@@ -12,6 +12,8 @@ config.json
 history.json
 scan_cache.json
 mcp.log
+mcp_scan.lock
+.mcp-scan-test.lock
 exports/
 
 # local tooling

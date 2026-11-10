@@ -3,14 +3,34 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import core.mcp_tools as mcp_tools
 from core.mcp_tools import FINDING_FIELDS, ToolError, call_tool
 from core.paths import get_data_dir
+
+LOCK_PATH = Path(__file__).with_name(".mcp-scan-test.lock")
+
+
+@pytest.fixture(autouse=True)
+def _reset_scan_state():
+    mcp_tools._SCAN_JOB = None
+    try:
+        LOCK_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+    yield
+    mcp_tools._SCAN_JOB = None
+    try:
+        LOCK_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 GB = 1024**3
 MB = 1024**2
@@ -172,6 +192,8 @@ def test_tools_list_has_complete_schemas():
         "projects_list",
         "cleanup_plan",
         "handoff_export",
+        "scan_start",
+        "scan_status",
     }
     for tool in mcp_tools.TOOLS:
         schema = tool["inputSchema"]
@@ -562,3 +584,143 @@ def test_handoff_export_requires_cache(monkeypatch):
 def test_handoff_export_rejects_unknown_argument(cache):
     with pytest.raises(ToolError):
         call_tool("handoff_export", {"target": "x"})
+
+
+# ---------------------------------------------------------------- P3 scan tools
+def _patch_scan(monkeypatch, *, delay: float = 0.0, rounds: int = 4):
+    saved: list[dict] = []
+
+    def fake_scan_path(root, *, cancel=None, progress=None, collect_duplicates=False):
+        cancelled = False
+        for index in range(rounds):
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                break
+            if progress is not None:
+                progress(f"已处理第 {index} 批")
+            if delay:
+                time.sleep(delay)
+        return SimpleNamespace(
+            root=str(root),
+            total_bytes=0,
+            file_count=0,
+            dir_count=0,
+            skipped_errors=0,
+            skipped_reparse=0,
+            cancelled=cancelled,
+            tree=None,
+            categories={},
+            large_files=[],
+            stale_files=[],
+            cache_dirs=[],
+            projects=[],
+            dup_candidates=[],
+        )
+
+    monkeypatch.setattr(mcp_tools, "scan_path", fake_scan_path)
+    monkeypatch.setattr(mcp_tools, "_scan_lock_path", lambda: LOCK_PATH)
+    monkeypatch.setattr(mcp_tools, "classify_scan", lambda result: [])
+    monkeypatch.setattr(mcp_tools, "result_to_dict", lambda result: {"root": result.root})
+    monkeypatch.setattr(mcp_tools, "save_audit_cache", lambda payload: saved.append(payload))
+    monkeypatch.setattr(mcp_tools, "finalize_projects", lambda projects: projects)
+    monkeypatch.setattr(mcp_tools, "build_drive_advice", lambda disks, findings, categories: [])
+    monkeypatch.setattr(mcp_tools, "get_disk_usage", lambda: [])
+    return saved
+
+
+def _status() -> dict:
+    return json.loads(call_tool("scan_status", {})[0]["text"])
+
+
+def _wait_scan(states: tuple[str, ...], timeout: float = 4.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        payload = _status()
+        if payload["state"] in states:
+            return payload
+        time.sleep(0.02)
+    raise AssertionError(f"scan did not reach {states}: {_status()}")
+
+
+def test_scan_status_without_a_job_errors():
+    with pytest.raises(ToolError):
+        call_tool("scan_status", {})
+
+
+def test_scan_start_validates_inputs():
+    with pytest.raises(ToolError):
+        call_tool("scan_start", {})
+    with pytest.raises(ToolError):
+        call_tool("scan_start", {"drives": []})
+    with pytest.raises(ToolError):
+        call_tool("scan_start", {"drives": ["XY"]})
+    with pytest.raises(ToolError):
+        call_tool("scan_start", {"drives": ["Z"]})
+    with pytest.raises(ToolError):
+        call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 0})
+    with pytest.raises(ToolError):
+        call_tool("scan_start", {"drives": ["C"], "unknown": 1})
+
+
+def test_scan_start_and_status_complete(monkeypatch):
+    saved = _patch_scan(monkeypatch)
+    started = json.loads(call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 5})[0]["text"])
+    assert started["state"] == "running"
+    assert started["drives"] == ["C"]
+    assert started["job_id"].startswith("scan-")
+
+    done = _wait_scan(("done",))
+    assert done["job_id"] == started["job_id"]
+    assert done["cache_saved"] is True
+    assert done["progress_percent"] == 100
+    assert done["drives_done"] == 1
+    assert len(saved) == 1
+    assert "results" in saved[0] and "findings" in saved[0]
+    assert not LOCK_PATH.exists()
+
+
+def test_scan_status_rejects_unknown_job_id(monkeypatch):
+    _patch_scan(monkeypatch)
+    call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 5})
+    _wait_scan(("done",))
+    with pytest.raises(ToolError):
+        call_tool("scan_status", {"job_id": "scan-19990101-000000"})
+    payload = _status()
+    assert payload["state"] == "done"
+
+
+def test_second_scan_is_busy(monkeypatch):
+    _patch_scan(monkeypatch, delay=0.05, rounds=20)
+    first = json.loads(call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 1})[0]["text"])
+    with pytest.raises(ToolError):
+        call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 5})
+    _wait_scan(("done", "timeout", "cancelled"), timeout=5.0)
+    assert first["state"] == "running"
+
+
+def test_scan_timeout_returns_partial_state(monkeypatch):
+    saved = _patch_scan(monkeypatch, delay=0.05, rounds=40)
+    call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 1})
+    timed_out = _wait_scan(("timeout",), timeout=6.0)
+    assert timed_out["cache_saved"] is False
+    assert timed_out["elapsed_seconds"] >= 1.0
+    assert saved == []
+
+
+def test_stale_lock_is_replaced(monkeypatch):
+    saved = _patch_scan(monkeypatch)
+    LOCK_PATH.write_text("scan-dead\n", encoding="utf-8")
+    old = time.time() - 1000
+    os.utime(LOCK_PATH, (old, old))
+    call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 5})
+    _wait_scan(("done",))
+    assert saved
+    assert not LOCK_PATH.exists()
+
+
+def test_fresh_lock_blocks_scan(monkeypatch):
+    _patch_scan(monkeypatch)
+    LOCK_PATH.write_text("scan-other\n", encoding="utf-8")
+    with pytest.raises(ToolError):
+        call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 5})
+    assert mcp_tools._SCAN_JOB is None

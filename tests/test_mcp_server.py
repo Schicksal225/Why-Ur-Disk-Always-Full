@@ -22,18 +22,18 @@ def _request(method: str, params: dict | None = None, request_id=1) -> dict:
     return message
 
 
-def _run_raw(raw: str, log_path=None) -> tuple[int, list[dict], str]:
+def _run_raw(raw: str, log_path=None, allow_scan: bool = False) -> tuple[int, list[dict], str]:
     stdin = io.StringIO(raw)
     stdout = io.StringIO()
-    code = serve(stdin=stdin, stdout=stdout, log_path=log_path)
+    code = serve(stdin=stdin, stdout=stdout, log_path=log_path, allow_scan=allow_scan)
     text = stdout.getvalue()
     replies = [json.loads(line) for line in text.splitlines()]
     return code, replies, text
 
 
-def _run(messages: list[dict], log_path=None) -> tuple[int, list[dict], str]:
+def _run(messages: list[dict], log_path=None, allow_scan: bool = False) -> tuple[int, list[dict], str]:
     raw = "".join(json.dumps(message, ensure_ascii=False) + "\n" for message in messages)
-    return _run_raw(raw, log_path=log_path)
+    return _run_raw(raw, log_path=log_path, allow_scan=allow_scan)
 
 
 def test_initialize_echoes_supported_protocol_version():
@@ -260,3 +260,44 @@ def test_missing_stdout_returns_2_without_raising(monkeypatch):
     assert code == 2
     assert "stdout" in errors.getvalue()
 
+
+
+def test_tools_list_hides_scan_tools_by_default():
+    _, replies, _ = _run([_request("tools/list")])
+    names = {tool["name"] for tool in replies[0]["result"]["tools"]}
+    assert names == {
+        "drives_list",
+        "findings_query",
+        "dir_children",
+        "projects_list",
+        "cleanup_plan",
+        "handoff_export",
+    }
+
+
+def test_tools_list_shows_scan_tools_when_enabled():
+    _, replies, _ = _run([_request("tools/list")], allow_scan=True)
+    names = {tool["name"] for tool in replies[0]["result"]["tools"]}
+    assert {"scan_start", "scan_status"} <= names
+
+
+def test_scan_tools_are_rejected_when_disabled():
+    request = _request(
+        "tools/call",
+        {"name": "scan_start", "arguments": {"drives": ["C"]}},
+    )
+    _, replies, _ = _run([request], allow_scan=False)
+    reply = replies[0]
+    assert reply["error"]["code"] == -32602
+    assert "scan_start" in reply["error"]["message"]
+
+
+def test_initialize_mentions_scan_switch():
+    initialize = _request(
+        "initialize",
+        {"protocolVersion": "2024-11-05", "capabilities": {}},
+    )
+    _, disabled, _ = _run([initialize], allow_scan=False)
+    assert "disabled" in disabled[0]["result"]["instructions"].lower()
+    _, enabled, _ = _run([initialize], allow_scan=True)
+    assert "enabled" in enabled[0]["result"]["instructions"].lower()

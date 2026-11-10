@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.mcp_tools import TOOLS, ToolError, call_tool
+from core.mcp_tools import SCAN_TOOL_NAMES, TOOLS, ToolError, call_tool
 from core.paths import get_bundle_dir, get_data_dir
 
 # Supported protocol versions, oldest first.  A client asking for one of these
@@ -35,6 +35,14 @@ INSTRUCTIONS = (
     "directories. cleanup_plan is a dry run and handoff_export only writes a "
     "report under the app's exports folder; this server cannot delete, move or "
     "modify scanned files."
+)
+SCAN_INSTRUCTIONS = (
+    " Scan tools are enabled: scan_start runs the normal read-only audit and "
+    "writes the audit cache, scan_status polls it."
+)
+SCAN_DISABLED_INSTRUCTIONS = (
+    " Scan tools are disabled; restart the server with --mcp-allow-scan to "
+    "enable them."
 )
 
 # Keep the on-disk call log small; one line per tools/call is enough.
@@ -124,7 +132,7 @@ def _error(request_id: Any, code: int, message: str) -> dict:
     }
 
 
-def _initialize(message: dict) -> dict:
+def _initialize(message: dict, allow_scan: bool) -> dict:
     params = message.get("params")
     if params is None:
         params = {}
@@ -134,15 +142,25 @@ def _initialize(message: dict) -> dict:
     protocol_version = (
         requested if requested in PROTOCOL_VERSIONS else LATEST_PROTOCOL_VERSION
     )
+    if allow_scan:
+        instructions = INSTRUCTIONS + SCAN_INSTRUCTIONS
+    else:
+        instructions = INSTRUCTIONS + SCAN_DISABLED_INSTRUCTIONS
     return _result(
         message.get("id"),
         {
             "protocolVersion": protocol_version,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": SERVER_NAME, "version": _server_version()},
-            "instructions": INSTRUCTIONS,
+            "instructions": instructions,
         },
     )
+
+
+def _available_tools(allow_scan: bool) -> list[dict]:
+    if allow_scan:
+        return TOOLS
+    return [tool for tool in TOOLS if tool["name"] not in SCAN_TOOL_NAMES]
 
 
 def _log_call(log_path: Any, tool: str, ok: bool, duration_ms: float) -> None:
@@ -172,7 +190,7 @@ def _append_log_file(log_path: Any, line: str) -> None:
         pass
 
 
-def _call(message: dict, log_path: Any) -> dict:
+def _call(message: dict, log_path: Any, allow_scan: bool) -> dict:
     started = time.perf_counter()
     tool = "<unknown>"
     ok = False
@@ -188,6 +206,12 @@ def _call(message: dict, log_path: Any) -> dict:
             args = {}
         if not isinstance(name, str) or name not in TOOL_NAMES:
             return _error(message.get("id"), -32602, f"unknown tool: {name}")
+        if name in SCAN_TOOL_NAMES and not allow_scan:
+            return _error(
+                message.get("id"),
+                -32602,
+                f"unknown tool: {name} (scan tools are disabled; start the server with --mcp-allow-scan)",
+            )
         tool = name
         if not isinstance(args, dict):
             return _error(
@@ -209,7 +233,7 @@ def _call(message: dict, log_path: Any) -> dict:
         _log_call(log_path, tool, ok, duration_ms)
 
 
-def _dispatch(message: Any, log_path: Any) -> dict | None:
+def _dispatch(message: Any, log_path: Any, allow_scan: bool) -> dict | None:
     if not isinstance(message, dict):
         return _error(None, -32600, "invalid request")
     if "id" not in message:
@@ -223,36 +247,37 @@ def _dispatch(message: Any, log_path: Any) -> dict | None:
     if not isinstance(method, str):
         return _error(request_id, -32600, "invalid request")
     if method == "initialize":
-        return _initialize(message)
+        return _initialize(message, allow_scan)
     if method == "ping":
         return _result(request_id, {})
     if method == "tools/list":
-        return _result(request_id, {"tools": TOOLS})
+        return _result(request_id, {"tools": _available_tools(allow_scan)})
     if method == "tools/call":
-        return _call(message, log_path)
+        return _call(message, log_path, allow_scan)
     return _error(request_id, -32601, f"method not found: {method}")
 
 
-def _handle_line(text: str, log_path: Any) -> dict | None:
+def _handle_line(text: str, log_path: Any, allow_scan: bool) -> dict | None:
     try:
         message = json.loads(text)
     except (json.JSONDecodeError, RecursionError):
         return _error(None, -32700, "parse error")
     try:
-        return _dispatch(message, log_path)
+        return _dispatch(message, log_path, allow_scan)
     except Exception as exc:  # noqa: BLE001 - keep the protocol stream alive
         _stderr(f"pcoptimizer mcp: internal error ({type(exc).__name__})")
         request_id = message.get("id") if isinstance(message, dict) else None
         return _error(request_id, -32603, "internal error")
 
 
-def serve(stdin=None, stdout=None, log_path=None) -> int:
+def serve(stdin=None, stdout=None, log_path=None, allow_scan: bool = False) -> int:
     """Serve newline-delimited JSON-RPC until stdin reaches EOF.
 
     Args:
         stdin: Text input; defaults to a UTF-8 wrapper around ``sys.stdin``.
         stdout: Text output; defaults to a UTF-8 wrapper around ``sys.stdout``.
         log_path: Optional call-log file.  ``None`` disables file logging.
+        allow_scan: Expose the scan_start/scan_status tools (opt-in flag).
 
     Returns:
         0 at EOF, 2 when no usable stdout/stream exists, 1 on a read failure.
@@ -275,7 +300,7 @@ def serve(stdin=None, stdout=None, log_path=None) -> int:
             text = line.strip()
             if not text:
                 continue
-            reply = _handle_line(text, log_path)
+            reply = _handle_line(text, log_path, allow_scan)
             if reply is None:
                 continue
             try:
@@ -290,4 +315,6 @@ def serve(stdin=None, stdout=None, log_path=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(serve(log_path=get_data_dir() / "mcp.log"))
+    raise SystemExit(
+        serve(log_path=get_data_dir() / "mcp.log", allow_scan="--mcp-allow-scan" in sys.argv)
+    )
