@@ -46,6 +46,14 @@ PC Optimizer — 使用说明
   · history.json   — 清理历史
   · scan_cache.json — 上次盘查结果
 
+【给 AI 客户端的 MCP 接口（可选）】
+  同一个 exe 也能作为本地 MCP server 运行，供 Cursor / Claude Code 等客户端调用：
+  PCOptimizer.exe --mcp
+  · 工具只读：列出盘符、发现项、目录树、项目，生成演练用清理计划，导出清单到 exports
+  · 不会删除或修改文件；真正清理仍需在本窗口勾选并确认
+  · 需要让 AI 触发盘查时加参数 --mcp-allow-scan
+  · 配置示例与数据暴露说明见仓库 docs/mcp-clients.md
+
 【常见问题】
   Q: 清理后释放空间比显示少？
   A: 部分文件被其他程序占用会跳过；临时文件只删除超过 1 天的。

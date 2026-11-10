@@ -51,6 +51,16 @@ Windows 本地磁盘盘查工具：看清每个盘存了什么，说明哪些可
 
 只有路径和元数据，没有文件内容，也不含删除脚本。
 
+## MCP 接口（给 AI 客户端）
+
+同一个 exe 也可以作为本地 MCP server 运行，Cursor、Claude Code、Codex 等客户端可以直接调用工具，不必先导出报告：
+
+```bat
+PCOptimizer.exe --mcp
+```
+
+工具全部只读：`drives_list`、`findings_query`、`dir_children`、`projects_list`、演练用的 `cleanup_plan`、以及 `handoff_export`；真正清理仍然只在窗口里进行。想让 AI 自己刷新盘查时加 `--mcp-allow-scan` 暴露 `scan_start` / `scan_status`。不联网、不开端口、不弹窗；客户端配置和数据暴露说明见 [docs/mcp-clients.md](docs/mcp-clients.md)。
+
 ## 从源码运行
 
 需要 Python 3.10 到 3.13。

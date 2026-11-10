@@ -26,6 +26,10 @@ jobs:
         shell: powershell
         continue-on-error: true
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\smoke_exe.ps1 -Exe dist\PCOptimizer.exe
+      - name: Smoke test (MCP handshake)
+        shell: powershell
+        continue-on-error: true
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\smoke_mcp.ps1 -Exe dist\PCOptimizer.exe
       - uses: actions/upload-artifact@v4
         with:
           name: PCOptimizer-win64

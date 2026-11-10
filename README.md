@@ -40,6 +40,16 @@ Every path is re-checked right before execution; earlier scan results are not tr
 
 "Projects" page, "Export for AI" writes `exports/handoff-<time>/REPORT.md` and `inventory.json`. It lists the rebuildable folders (`node_modules`, `target`, ...) of projects on drives D and E, largest first, at most 30 entries of 100 MB or more. Each entry has the full path, size, whether the project has uncommitted changes, whether git tracks files inside it, and the command that rebuilds it; smaller ones are rolled into one total. The list states facts only, the agent decides what to delete. No file contents, no delete scripts.
 
+## MCP bridge (tools for AI clients)
+
+The same exe can run as a local MCP server, so Cursor, Claude Code, Codex and similar clients can call tools directly instead of reading an exported report:
+
+```bat
+PCOptimizer.exe --mcp
+```
+
+The tools are read-only: `drives_list`, `findings_query`, `dir_children`, `projects_list`, a dry-run `cleanup_plan`, and `handoff_export`. Actual cleanup still happens only in the window. Add `--mcp-allow-scan` to expose `scan_start` / `scan_status` when you want the agent to refresh the audit itself. No network, no ports, no GUI; see [docs/mcp-clients.md](docs/mcp-clients.md) for client configuration and the data-exposure note.
+
 ## Run from source
 
 Python 3.10 to 3.13.

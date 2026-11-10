@@ -47,12 +47,18 @@ rem temp folder, so the window smoke test would fail before step 5 runs.
 icacls "dist\PCOptimizer.exe" /setintegritylevel Medium >nul 2>&1
 
 if "%SKIP_SMOKE%"=="1" (
-  echo Smoke test skipped.
+  echo Smoke tests skipped.
 ) else (
   echo Smoke test: the exe must open its window...
   powershell -NoProfile -ExecutionPolicy Bypass -File "tools\smoke_exe.ps1" -Exe "dist\PCOptimizer.exe"
   if errorlevel 1 (
     echo Smoke test failed. The exe did not open the PC Optimizer window.
+    exit /b 1
+  )
+  echo MCP smoke: the exe must answer initialize, tools/list and drives_list...
+  powershell -NoProfile -ExecutionPolicy Bypass -File "tools\smoke_mcp.ps1" -Exe "dist\PCOptimizer.exe"
+  if errorlevel 1 (
+    echo MCP smoke failed. The --mcp bridge did not answer the handshake.
     exit /b 1
   )
 )
