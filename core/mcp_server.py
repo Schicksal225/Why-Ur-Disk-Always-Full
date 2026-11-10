@@ -30,8 +30,9 @@ SERVER_NAME = "pcoptimizer"
 TOOL_NAMES = frozenset(tool["name"] for tool in TOOLS)
 
 INSTRUCTIONS = (
-    "Read-only access to PC Optimizer audit data: drive capacity, free space "
-    "and scan freshness. This server cannot delete, move or modify files."
+    "Read-only access to PC Optimizer audit data: drive capacity and freshness, "
+    "findings, the stored directory tree and projects with their rebuildable "
+    "directories. This server cannot delete, move or modify files."
 )
 
 # Keep the on-disk call log small; one line per tools/call is enough.
