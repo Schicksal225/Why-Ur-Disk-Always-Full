@@ -25,7 +25,7 @@ if not defined PYTHON (
 )
 echo Using Python: %PYTHON%
 
-echo [1/4] Preparing .venv and dependencies...
+echo [1/5] Preparing .venv and dependencies...
 if not exist ".venv\Scripts\python.exe" (
   %PYTHON% -m venv .venv
   if errorlevel 1 exit /b 1
@@ -34,11 +34,11 @@ set "VPY=.venv\Scripts\python.exe"
 "%VPY%" -m pip install -q --disable-pip-version-check -r requirements-dev.txt
 if errorlevel 1 exit /b 1
 
-echo [2/4] Running tests...
+echo [2/5] Running tests...
 "%VPY%" -m pytest tests -q
 if errorlevel 1 exit /b 1
 
-echo [3/4] Building PCOptimizer.exe ...
+echo [3/5] Building PCOptimizer.exe ...
 "%VPY%" -m PyInstaller --noconfirm --clean PCOptimizer.spec
 if errorlevel 1 exit /b 1
 
@@ -53,7 +53,7 @@ if "%SKIP_SMOKE%"=="1" (
   )
 )
 
-echo [4/4] Assembling release folder...
+echo [4/5] Assembling release folder...
 if exist "release" rmdir /s /q "release"
 mkdir "release\%NAME%"
 copy /y "dist\PCOptimizer.exe" "release\%NAME%\PCOptimizer.exe" >nul
@@ -66,9 +66,27 @@ powershell -NoProfile -Command "Compress-Archive -Path 'release\%NAME%\*' -Desti
 if errorlevel 1 exit /b 1
 powershell -NoProfile -Command "$h=(Get-FileHash $env:ZIP -Algorithm SHA256).Hash.ToLower(); \"$([IO.Path]::GetFileName($env:ZIP))`nSHA256: $h\" | Set-Content 'release\CHECKSUMS.txt' -Encoding UTF8"
 
+echo [5/5] Preparing a runnable copy outside the project folder...
+rem Windows marks a folder written through an agent sandbox with a Low integrity label.
+rem An exe carrying that label starts as a Low integrity process and cannot create its
+rem PyInstaller temp folder ("Could not create temporary directory"). Relabel the built
+rem exes (works when this script runs elevated) and keep a copy under LOCALAPPDATA: the
+rem copy inherits the normal label and always starts.
+set "RUNDIR=%LOCALAPPDATA%\PCOptimizer"
+if not exist "%RUNDIR%" mkdir "%RUNDIR%" >nul 2>nul
+icacls "dist\PCOptimizer.exe" /setintegritylevel Medium >nul 2>&1
+icacls "release\%NAME%\PCOptimizer.exe" /setintegritylevel Medium >nul 2>&1
+copy /y "dist\PCOptimizer.exe" "%RUNDIR%\PCOptimizer.exe" >nul 2>nul
+if exist "%RUNDIR%\PCOptimizer.exe" (
+  echo   Run copy:  "%RUNDIR%\PCOptimizer.exe"
+) else (
+  echo   Run copy unavailable - use the exe from the release zip or outside this folder.
+)
+
 echo.
 echo Build finished.
 echo   Zip:      %ZIP%
 echo   Exe:      %CD%\release\%NAME%\PCOptimizer.exe
+echo   Run copy: "%RUNDIR%\PCOptimizer.exe"
 echo   Checksum: %CD%\release\CHECKSUMS.txt
 endlocal

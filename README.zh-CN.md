@@ -69,6 +69,8 @@ build_release.bat
 脚本会在项目内创建 `.venv`，安装依赖、跑测试、打包、检查窗口能否打开，最后打印压缩包的完整路径。不依赖特定的 Python 安装位置。
 产物在 `release\`，版本号来自 `VERSION` 文件。
 
+如果项目目录被 agent 沙箱（例如 DeepSeek Harness 的 `workspace-write`）打上了 Windows 低完整性标签，在目录里构建的 exe 启动时会报「无法创建临时目录」：Windows 以低完整性启动它，它无法创建 PyInstaller 的临时目录。构建脚本在管理员权限下会把两个 exe 的标签改回 Medium，并且总会把一份可直接运行的副本写到 `%LOCALAPPDATA%\PCOptimizer\PCOptimizer.exe`；本地测试用这份副本即可。
+
 ## 开发
 
 ```bat

@@ -57,6 +57,8 @@ build_release.bat
 
 Creates a `.venv`, installs dependencies, runs tests, builds, checks that the window opens, and prints the full path of the zip. Set `PCOPT_PYTHON` to a `python.exe` if Python is not found automatically. The version comes from the `VERSION` file.
 
+If the project folder is used through an agent sandbox that marks it with a Windows Low integrity label (for example DeepSeek Harness `workspace-write`), an exe built inside it fails to start with "Could not create temporary directory": Windows launches it at Low integrity, so it cannot create its PyInstaller temp folder. The build script relabels both built exes when it runs elevated and always writes a runnable copy to `%LOCALAPPDATA%\PCOptimizer\PCOptimizer.exe`; use that copy for local testing.
+
 ## Development
 
 ```bat
