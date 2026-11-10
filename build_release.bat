@@ -68,7 +68,17 @@ copy /y "LICENSE" "release\%NAME%\LICENSE" >nul
 set "ZIP=%CD%\release\%NAME%.zip"
 powershell -NoProfile -Command "Compress-Archive -Path 'release\%NAME%\*' -DestinationPath $env:ZIP -Force"
 if errorlevel 1 exit /b 1
-powershell -NoProfile -Command "$h=(Get-FileHash $env:ZIP -Algorithm SHA256).Hash.ToLower(); \"$([IO.Path]::GetFileName($env:ZIP))`nSHA256: $h\" | Set-Content 'release\CHECKSUMS.txt' -Encoding UTF8"
+rem certutil ships with Windows; the PowerShell available here may run in a
+rem restricted context where Get-FileHash is not available.
+del /q "release\CHECKSUMS.txt" >nul 2>nul
+for /f "tokens=* delims=" %%L in ('certutil -hashfile "%ZIP%" SHA256 ^| findstr /r "^[0-9a-f][0-9a-f]"') do (
+  >> "release\CHECKSUMS.txt" echo %NAME%.zip
+  >> "release\CHECKSUMS.txt" echo SHA256: %%L
+)
+if not exist "release\CHECKSUMS.txt" (
+  echo Failed to compute the SHA256 checksum.
+  exit /b 1
+)
 
 echo [5/5] Preparing a runnable copy outside the project folder...
 rem Windows marks a folder written through an agent sandbox with a Low integrity label.
