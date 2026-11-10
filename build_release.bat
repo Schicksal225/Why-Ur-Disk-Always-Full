@@ -42,6 +42,10 @@ echo [3/5] Building PCOptimizer.exe ...
 "%VPY%" -m PyInstaller --noconfirm --clean PCOptimizer.spec
 if errorlevel 1 exit /b 1
 
+rem A Low integrity label on the workspace would make Windows refuse the PyInstaller
+rem temp folder, so the window smoke test would fail before step 5 runs.
+icacls "dist\PCOptimizer.exe" /setintegritylevel Medium >nul 2>&1
+
 if "%SKIP_SMOKE%"=="1" (
   echo Smoke test skipped.
 ) else (
