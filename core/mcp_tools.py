@@ -13,10 +13,14 @@ import json
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from core.cleaner import get_disk_usage
-from core.handoff import restore_command
+from core.classifier import Finding
+from core.executor import execute_findings, recycle_block_reason
+from core.handoff import export_handoff, restore_command
+from core.paths import get_data_dir
 from core.safety import deletion_allowed, is_cache_clean_path
 from core.scanner import load_audit_cache
 from core.store import Store
@@ -505,12 +509,190 @@ def _projects_list(args: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+# ---------------------------------------------------------------- 4.5 cleanup_plan
+def _finding_from_row(row: dict) -> Finding:
+    return Finding(
+        id=str(row.get("id") or ""),
+        path=str(row.get("path") or ""),
+        label=str(row.get("label") or ""),
+        category=str(row.get("category") or ""),
+        action=str(row.get("action") or ""),
+        risk=str(row.get("risk") or ""),
+        size=_size(row.get("size")),
+        reason=str(row.get("reason") or ""),
+        suggestion=str(row.get("suggestion") or ""),
+        selectable=bool(row.get("selectable")),
+        selected=bool(row.get("selected")),
+    )
+
+
+def _plan_candidates(
+    cache: dict, candidate_ids: list[str], protected_paths: list[str]
+) -> tuple[list[dict], list[dict]]:
+    """Split candidate ids into executable rows and skipped rows with a reason."""
+    raw_findings = cache.get("findings")
+    rows = (
+        [row for row in raw_findings if isinstance(row, dict)]
+        if isinstance(raw_findings, list)
+        else []
+    )
+    by_id = {str(row.get("id")): row for row in rows if row.get("id")}
+    missing = [candidate for candidate in candidate_ids if candidate not in by_id]
+    if missing:
+        raise ToolError("candidate not in the audit cache: " + ", ".join(missing))
+
+    executable: list[dict] = []
+    skipped: list[dict] = []
+    for candidate in candidate_ids:
+        row = by_id[candidate]
+        label = str(row.get("label") or candidate)
+        action = str(row.get("action") or "")
+        path = row.get("path")
+        if action not in ("cache_clean", "recycle_suggest"):
+            skipped.append({"id": candidate, "label": label, "reason": "仅建议项，不能执行"})
+            continue
+        if not isinstance(path, str) or not path:
+            skipped.append({"id": candidate, "label": label, "reason": "没有可执行路径"})
+            continue
+        allowed, reason = deletion_allowed(path, protected_paths)
+        if not allowed:
+            skipped.append({"id": candidate, "label": label, "reason": reason or "安全校验拒绝"})
+            continue
+        if action == "cache_clean" and not is_cache_clean_path(path):
+            skipped.append({"id": candidate, "label": label, "reason": "不在可清理的缓存目录内"})
+            continue
+        executable.append(row)
+    return executable, skipped
+
+
+def _cleanup_plan(args: dict[str, Any]) -> str:
+    _reject_unknown(args, {"candidate_ids", "min_age_days"})
+    raw_ids = args.get("candidate_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ToolError("candidate_ids must be a non-empty array of finding ids")
+    candidate_ids: list[str] = []
+    for item in raw_ids:
+        if not isinstance(item, str) or not item.strip():
+            raise ToolError("candidate_ids must contain non-empty strings")
+        if item not in candidate_ids:
+            candidate_ids.append(item)
+    min_age_days = _int_arg(args, "min_age_days", 1, 0, 30)
+
+    cache = load_audit_cache()
+    if not isinstance(cache, dict):
+        raise ToolError("no audit cache found; run a disk scan first")
+    protected_paths = list(Store().protected_paths)
+    rows, skipped = _plan_candidates(cache, candidate_ids, protected_paths)
+
+    steps: list[dict[str, Any]] = []
+    if rows:
+        findings = [_finding_from_row(row) for row in rows]
+        # dry_run keeps execute_findings read-only: no store write, no recycle
+        # call and no directory cleanup happen on this path.
+        results = execute_findings(
+            findings,
+            protected_paths,
+            dry_run=True,
+            store=None,
+            min_age_days=min_age_days,
+        )
+        for row, result in zip(rows, results):
+            action = str(row.get("action") or "")
+            path = str(row.get("path") or "")
+            size = _size(row.get("size"))
+            warning: str | None = None
+            if action == "cache_clean":
+                warning = "直接清理，不能从回收站还原"
+            elif action == "recycle_suggest":
+                try:
+                    blocked = recycle_block_reason(path, size)
+                except (OSError, ValueError):
+                    blocked = "无法查询回收站状态"
+                if blocked:
+                    warning = "回收站不可用，确认执行会永久删除：" + blocked
+            steps.append(
+                {
+                    "id": str(row.get("id") or ""),
+                    "label": str(row.get("label") or ""),
+                    "method": action,
+                    "paths": [path] if path else [],
+                    "bytes": size,
+                    "would_delete": 0,
+                    "reason": result.message,
+                    "warning": warning,
+                }
+            )
+
+    stale, scan_age_hours = _freshness(cache)
+    plan = {
+        "plan_id": "plan-" + datetime.now().strftime("%Y%m%d-%H%M%S"),
+        "steps": steps,
+        "skipped": skipped,
+        "note": "仅演练：本工具不会删除任何文件。执行仍需在 PC Optimizer 界面勾选并确认。",
+        "stale": stale,
+        "scan_age_hours": scan_age_hours,
+    }
+    return json.dumps(plan, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------- 4.6 handoff_export
+def _count_export_items(folder: Path) -> int:
+    try:
+        data = json.loads((folder / "inventory.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return 0
+    items = data.get("items") if isinstance(data, dict) else None
+    return len(items) if isinstance(items, list) else 0
+
+
+def _handoff_export(args: dict[str, Any]) -> str:
+    _reject_unknown(args, {"dest"})
+    dest = _string_arg(args, "dest", required=False)
+    dest_root: Path | None = None
+    if dest is not None:
+        raw = dest.strip()
+        candidate = Path(raw)
+        if candidate.is_absolute() or candidate.drive or raw.startswith(("\\\\", "//")):
+            raise ToolError("dest must be a relative path under the exports directory")
+        exports_root = (get_data_dir() / "exports").resolve()
+        resolved = (exports_root / raw).resolve()
+        try:
+            resolved.relative_to(exports_root)
+        except ValueError:
+            raise ToolError("dest must stay under the exports directory") from None
+        if resolved == exports_root:
+            raise ToolError("dest must name a subdirectory, not the exports root")
+        dest_root = resolved
+
+    cache = load_audit_cache()
+    if not isinstance(cache, dict):
+        raise ToolError("no audit cache found; run a disk scan first")
+    raw_projects = cache.get("projects")
+    projects = [item for item in raw_projects if isinstance(item, dict)] if isinstance(raw_projects, list) else []
+    try:
+        folder = Path(export_handoff(projects, get_disk_usage(), dest_root=dest_root))
+    except OSError as exc:
+        raise ToolError(f"export failed: {exc}") from exc
+
+    return json.dumps(
+        {
+            "folder": str(folder),
+            "report": str(folder / "REPORT.md"),
+            "inventory": str(folder / "inventory.json"),
+            "items": _count_export_items(folder),
+        },
+        ensure_ascii=False,
+    )
+
+
 # ---------------------------------------------------------------- registry
 _HANDLERS: dict[str, Any] = {
     "drives_list": _drives_list,
     "findings_query": _findings_query,
     "dir_children": _dir_children,
     "projects_list": _projects_list,
+    "cleanup_plan": _cleanup_plan,
+    "handoff_export": _handoff_export,
 }
 
 _ADDITIONAL_PROPERTIES_FALSE = {
@@ -629,6 +811,57 @@ TOOLS: list[dict[str, Any]] = [
                     "minimum": 0,
                     "description": "Minimum own rebuildable bytes in MiB.",
                 },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "cleanup_plan",
+        "description": (
+            "Dry-run plan for candidate findings from the last audit scan. It "
+            "explains what each cleanup would do (cache clean or recycle) and "
+            "predicts whether the recycle bin would permanently delete instead. "
+            "Nothing is deleted, moved or written: the user still has to select "
+            "and confirm the items in the PC Optimizer window."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "candidate_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "description": "Finding ids to plan, as returned by findings_query.",
+                },
+                "min_age_days": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 30,
+                    "default": 1,
+                    "description": "Age filter applied to temporary-file cleanup.",
+                },
+            },
+            "required": ["candidate_ids"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "handoff_export",
+        "description": (
+            "Write the same 'hand off to an AI' inventory the GUI exports: project "
+            "rebuildable directories with restore commands, under the app's "
+            "exports directory. dest may name a relative subdirectory of exports. "
+            "It only writes inventory.json/REPORT.md there; it never deletes or "
+            "modifies scanned files."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dest": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Relative subdirectory under exports (optional).",
+                }
             },
             "additionalProperties": False,
         },

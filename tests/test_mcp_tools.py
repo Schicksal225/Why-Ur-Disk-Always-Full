@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 import core.mcp_tools as mcp_tools
 from core.mcp_tools import FINDING_FIELDS, ToolError, call_tool
+from core.paths import get_data_dir
 
 GB = 1024**3
 MB = 1024**2
@@ -143,6 +145,9 @@ def cache(monkeypatch) -> dict:
     monkeypatch.setattr(mcp_tools, "load_audit_cache", lambda: data)
     monkeypatch.setattr(mcp_tools, "deletion_allowed", lambda path, protected: (True, ""))
     monkeypatch.setattr(mcp_tools, "is_cache_clean_path", lambda path: True)
+    # execute_findings is called with dry_run=True; its own gate must not reject
+    # the synthetic fixture paths before the dry-run branch is reached.
+    monkeypatch.setattr("core.executor.deletion_allowed", lambda path, protected: (True, ""))
 
     class _Store:
         protected_paths: list[str] = []
@@ -160,7 +165,14 @@ def _payload(tool: str, args: dict | None = None) -> dict:
 # ---------------------------------------------------------------- schemas
 def test_tools_list_has_complete_schemas():
     names = {tool["name"] for tool in mcp_tools.TOOLS}
-    assert names == {"drives_list", "findings_query", "dir_children", "projects_list"}
+    assert names == {
+        "drives_list",
+        "findings_query",
+        "dir_children",
+        "projects_list",
+        "cleanup_plan",
+        "handoff_export",
+    }
     for tool in mcp_tools.TOOLS:
         schema = tool["inputSchema"]
         assert schema["type"] == "object"
@@ -176,6 +188,8 @@ def test_tools_list_has_complete_schemas():
     }
     children = next(tool for tool in mcp_tools.TOOLS if tool["name"] == "dir_children")
     assert children["inputSchema"]["required"] == ["drive", "path"]
+    plan = next(tool for tool in mcp_tools.TOOLS if tool["name"] == "cleanup_plan")
+    assert plan["inputSchema"]["required"] == ["candidate_ids"]
 
 
 # ---------------------------------------------------------------- findings_query
@@ -368,3 +382,183 @@ def test_projects_empty_cache(monkeypatch):
     assert payload["projects"] == []
     assert payload["total"] == 0
     assert payload["stale"] is True
+
+
+# ---------------------------------------------------------------- cleanup_plan
+def _plan(candidate_ids, **extra):
+    args = {"candidate_ids": candidate_ids}
+    args.update(extra)
+    return _payload("cleanup_plan", args)
+
+
+def test_cleanup_plan_reports_steps_without_deleting(cache, monkeypatch):
+    real = mcp_tools.execute_findings
+    calls = {}
+    monkeypatch.setattr(mcp_tools, "recycle_block_reason", lambda path, size: None)
+
+    def wrapped(findings, protected_paths, **kwargs):
+        calls["findings"] = findings
+        calls["kwargs"] = kwargs
+        return real(findings, protected_paths, **kwargs)
+
+    monkeypatch.setattr(mcp_tools, "execute_findings", wrapped)
+    plan = _plan(["c1", "r1"], min_age_days=7)
+
+    assert plan["plan_id"].startswith("plan-")
+    assert plan["note"]
+    assert [step["id"] for step in plan["steps"]] == ["c1", "r1"]
+    assert [step["method"] for step in plan["steps"]] == ["cache_clean", "recycle_suggest"]
+    assert plan["steps"][0]["paths"] == ["C:\\Users\\A\\AppData\\Local\\Temp"]
+    assert plan["steps"][0]["would_delete"] == 0
+    assert plan["steps"][0]["warning"]
+    assert plan["steps"][1]["warning"] is None
+    assert calls["kwargs"]["dry_run"] is True
+    assert calls["kwargs"]["store"] is None
+    assert calls["kwargs"]["min_age_days"] == 7
+
+
+def test_cleanup_plan_skips_gate_rejected_paths(cache, monkeypatch):
+    monkeypatch.setattr(mcp_tools, "recycle_block_reason", lambda path, size: None)
+    monkeypatch.setattr(
+        mcp_tools,
+        "deletion_allowed",
+        lambda path, protected: (False, "受保护路径") if "Temp" in path else (True, ""),
+    )
+    plan = _plan(["c1", "r1"])
+    step_paths = [path for step in plan["steps"] for path in step["paths"]]
+    assert "C:\\Users\\A\\AppData\\Local\\Temp" not in step_paths
+    assert [step["id"] for step in plan["steps"]] == ["r1"]
+    assert plan["skipped"][0]["id"] == "c1"
+    assert "受保护" in plan["skipped"][0]["reason"]
+
+
+def test_cleanup_plan_skips_advice_and_cache_gate(cache, monkeypatch):
+    monkeypatch.setattr(mcp_tools, "recycle_block_reason", lambda path, size: None)
+    monkeypatch.setattr(mcp_tools, "is_cache_clean_path", lambda path: False)
+    plan = _plan(["o1", "c1"])
+    assert plan["steps"] == []
+    reasons = {item["id"]: item["reason"] for item in plan["skipped"]}
+    assert "建议" in reasons["o1"]
+    assert "缓存" in reasons["c1"]
+
+
+def test_cleanup_plan_reports_recycle_warning(cache, monkeypatch):
+    monkeypatch.setattr(mcp_tools, "recycle_block_reason", lambda path, size: "回收站已关闭")
+    plan = _plan(["r1"])
+    assert "回收站已关闭" in plan["steps"][0]["warning"]
+
+
+def test_cleanup_plan_has_no_side_effects(cache, monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise AssertionError("cleanup_plan attempted a filesystem change")
+
+    monkeypatch.setattr("os.remove", boom)
+    monkeypatch.setattr("shutil.rmtree", boom)
+    monkeypatch.setattr("core.executor.send_to_recycle_bin", boom)
+    monkeypatch.setattr("core.executor._clean_directory", boom)
+    monkeypatch.setattr(mcp_tools, "recycle_block_reason", lambda path, size: None)
+    history_writes = []
+
+    class _Store:
+        protected_paths: list[str] = []
+
+        def add_storage_run(self, *args, **kwargs):
+            history_writes.append(args)
+
+    monkeypatch.setattr(mcp_tools, "Store", _Store)
+
+    plan = _plan(["c1", "r1"])
+    assert len(plan["steps"]) == 2
+    assert history_writes == []
+
+
+def test_cleanup_plan_rejects_bad_input(cache):
+    with pytest.raises(ToolError):
+        call_tool("cleanup_plan", {})
+    with pytest.raises(ToolError):
+        call_tool("cleanup_plan", {"candidate_ids": []})
+    with pytest.raises(ToolError):
+        call_tool("cleanup_plan", {"candidate_ids": [1]})
+    with pytest.raises(ToolError):
+        call_tool("cleanup_plan", {"candidate_ids": ["nope"]})
+    with pytest.raises(ToolError):
+        call_tool("cleanup_plan", {"candidate_ids": ["c1"], "min_age_days": -1})
+    with pytest.raises(ToolError):
+        call_tool("cleanup_plan", {"candidate_ids": ["c1"], "extra": 1})
+
+
+def test_cleanup_plan_requires_cache(monkeypatch):
+    monkeypatch.setattr(mcp_tools, "load_audit_cache", lambda: None)
+    with pytest.raises(ToolError):
+        call_tool("cleanup_plan", {"candidate_ids": ["c1"]})
+
+
+# ---------------------------------------------------------------- handoff_export
+def _fake_export(monkeypatch, *, items: int = 3, error: Exception | None = None, folder: Path | None = None):
+    captured: dict = {"projects": None, "drives": None, "dest_root": None}
+    target = folder or (get_data_dir() / "exports" / "handoff-20260101-000000")
+
+    def fake(projects, drives, dest_root=None):
+        captured["projects"] = projects
+        captured["drives"] = drives
+        captured["dest_root"] = dest_root
+        if error is not None:
+            raise error
+        return target
+
+    monkeypatch.setattr(mcp_tools, "export_handoff", fake)
+    monkeypatch.setattr(mcp_tools, "_count_export_items", lambda _folder: items)
+    monkeypatch.setattr(
+        mcp_tools,
+        "get_disk_usage",
+        lambda: [{"drive": "D", "total_gb": 1, "used_gb": 0.5, "free_gb": 0.5, "percent": 50}],
+    )
+    return captured, target
+
+
+def test_handoff_export_defaults_to_the_exports_folder(cache, monkeypatch):
+    captured, folder = _fake_export(monkeypatch)
+    payload = json.loads(call_tool("handoff_export", {})[0]["text"])
+
+    assert payload["folder"] == str(folder)
+    assert payload["report"] == str(folder / "REPORT.md")
+    assert payload["inventory"] == str(folder / "inventory.json")
+    assert payload["items"] == 3
+    assert captured["dest_root"] is None
+    assert captured["projects"] == cache["projects"]
+    assert captured["drives"][0]["drive"] == "D"
+
+
+def test_handoff_export_keeps_dest_under_exports(cache, monkeypatch):
+    captured, folder = _fake_export(monkeypatch)
+    payload = json.loads(call_tool("handoff_export", {"dest": "agent/run1"})[0]["text"])
+    exports_root = (get_data_dir() / "exports").resolve()
+    assert captured["dest_root"] == (exports_root / "agent" / "run1").resolve()
+    assert (exports_root / "agent" / "run1").resolve().is_relative_to(exports_root)
+    assert payload["items"] == 3
+
+
+@pytest.mark.parametrize("dest", ["C:\\evil", "..\\escape", "D:foo", "\\\\server\\share", "   "])
+def test_handoff_export_rejects_escapes(cache, monkeypatch, dest):
+    calls = []
+    monkeypatch.setattr(mcp_tools, "export_handoff", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(ToolError):
+        call_tool("handoff_export", {"dest": dest})
+    assert calls == []
+
+
+def test_handoff_export_wraps_oserror(cache, monkeypatch):
+    _fake_export(monkeypatch, error=OSError("disk full"))
+    with pytest.raises(ToolError):
+        call_tool("handoff_export", {})
+
+
+def test_handoff_export_requires_cache(monkeypatch):
+    monkeypatch.setattr(mcp_tools, "load_audit_cache", lambda: None)
+    with pytest.raises(ToolError):
+        call_tool("handoff_export", {})
+
+
+def test_handoff_export_rejects_unknown_argument(cache):
+    with pytest.raises(ToolError):
+        call_tool("handoff_export", {"target": "x"})

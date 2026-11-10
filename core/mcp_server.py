@@ -32,7 +32,9 @@ TOOL_NAMES = frozenset(tool["name"] for tool in TOOLS)
 INSTRUCTIONS = (
     "Read-only access to PC Optimizer audit data: drive capacity and freshness, "
     "findings, the stored directory tree and projects with their rebuildable "
-    "directories. This server cannot delete, move or modify files."
+    "directories. cleanup_plan is a dry run and handoff_export only writes a "
+    "report under the app's exports folder; this server cannot delete, move or "
+    "modify scanned files."
 )
 
 # Keep the on-disk call log small; one line per tools/call is enough.
