@@ -126,7 +126,10 @@ def test_recycle_refuses_when_bin_is_disabled(tmp_path: Path):
     assert "关闭回收站" in results[0].message
 
 
-def test_cache_clean_rejects_path_outside_whitelist(tmp_path: Path):
+def test_cache_clean_rejects_path_outside_whitelist(tmp_path: Path, monkeypatch):
+    # tmp_path lives under %TEMP%, which is itself a cleanup root, so stub the
+    # whitelist gate instead of relying on a machine-specific unwritable path.
+    monkeypatch.setattr("core.executor.is_cache_clean_path", lambda _path: False)
     root = tmp_path / "PCOptimizerAuditTest"
     root.mkdir()
     target = root / "a.tmp"
