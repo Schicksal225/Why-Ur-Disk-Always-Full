@@ -6,7 +6,7 @@ import ctypes
 import os
 import sys
 
-from core.paths import get_bundle_dir
+from core.paths import get_bundle_dir, get_data_dir
 
 APP_DIR = str(get_bundle_dir())
 if APP_DIR not in sys.path:
@@ -17,6 +17,10 @@ from app.runtime import WEBVIEW2_URL, webview2_available  # noqa: E402
 
 
 def main() -> None:
+    if "--mcp" in sys.argv:
+        from core.mcp_server import serve
+
+        raise SystemExit(serve(log_path=get_data_dir() / "mcp.log"))
     if os.name == "nt" and not webview2_available():
         ctypes.windll.user32.MessageBoxW(
             None,
