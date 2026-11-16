@@ -46,6 +46,9 @@ PC Optimizer — 使用说明
   · history.json   — 清理历史
   · scan_cache.json — 上次盘查结果
 
+  如需让 GUI 和 MCP 共用另一个数据目录，可设置环境变量 PCOPT_DATA_DIR（绝对路径），
+  两边都会读写该目录下的 config.json / history.json / scan_cache.json。
+
 【给 AI 客户端的 MCP 接口（可选）】
   同一个 exe 也能作为本地 MCP server 运行，供 Cursor / Claude Code 等客户端调用：
   PCOptimizer.exe --mcp

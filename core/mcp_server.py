@@ -48,6 +48,10 @@ SCAN_DISABLED_INSTRUCTIONS = (
 # Keep the on-disk call log small; one line per tools/call is enough.
 LOG_MAX_BYTES = 512 * 1024
 
+# One JSON-RPC message cannot be arbitrarily large: 4 MiB is far above any real
+# tools/call and keeps a broken client from exhausting memory.
+MAX_MESSAGE_CHARS = 4 * 1024 * 1024
+
 
 def _stderr(message: str) -> None:
     """Write a diagnostic line to stderr without ever touching stdout."""
@@ -258,6 +262,8 @@ def _dispatch(message: Any, log_path: Any, allow_scan: bool) -> dict | None:
 
 
 def _handle_line(text: str, log_path: Any, allow_scan: bool) -> dict | None:
+    if len(text) > MAX_MESSAGE_CHARS:
+        return _error(None, -32600, "request too large")
     try:
         message = json.loads(text)
     except (json.JSONDecodeError, RecursionError):

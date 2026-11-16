@@ -161,3 +161,21 @@ def test_sum_tree_does_not_recurse_once_per_directory(tmp_path: Path):
     finally:
         sys.setrecursionlimit(old_limit)
     assert result.file_count == 2
+
+
+def test_save_audit_cache_replaces_atomically_without_leftover_temp(monkeypatch):
+    import json
+    from pathlib import Path
+
+    import core.scanner as scanner
+
+    target = Path(__file__).with_name(".audit-cache-test.json")
+    target.unlink(missing_ok=True)
+    monkeypatch.setattr(scanner, "audit_cache_path", lambda: target)
+    try:
+        scanner.save_audit_cache({"scan": 1})
+        scanner.save_audit_cache({"scan": 2})
+        assert json.loads(target.read_text(encoding="utf-8")) == {"scan": 2}
+        assert list(target.parent.glob(target.name + ".*.tmp")) == []
+    finally:
+        target.unlink(missing_ok=True)

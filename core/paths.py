@@ -19,7 +19,14 @@ def get_bundle_dir() -> Path:
 
 
 def get_data_dir() -> Path:
-    """Writable directory for config/history (beside exe when frozen)."""
+    """Writable directory for config/history (beside exe when frozen).
+
+    ``PCOPT_DATA_DIR`` overrides it for both the GUI and the MCP server, which
+    is useful when several copies of the exe should share one scan cache.
+    """
+    override = os.environ.get("PCOPT_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     if is_frozen():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent

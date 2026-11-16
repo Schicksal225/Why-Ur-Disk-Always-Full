@@ -110,7 +110,8 @@ def test_tools_call_drives_list_returns_parseable_json():
     assert len(content) == 1
     assert content[0]["type"] == "text"
     payload = json.loads(content[0]["text"])
-    assert set(payload) == {"drives"}
+    assert set(payload) == {"drives", "cache"}
+    assert set(payload["cache"]) == {"path", "exists", "results"}
     assert isinstance(payload["drives"], list)
     for drive in payload["drives"]:
         assert set(drive) == {
@@ -122,7 +123,18 @@ def test_tools_call_drives_list_returns_parseable_json():
             "scanned_at",
             "scan_age_hours",
             "stale",
+            "last_scan",
         }
+        if drive["last_scan"] is not None:
+            assert set(drive["last_scan"]) == {
+                "scanned_at",
+                "total_bytes",
+                "file_count",
+                "dir_count",
+                "skipped_errors",
+                "skipped_reparse",
+                "cancelled",
+            }
 
 
 def test_unknown_method_returns_method_not_found_with_same_id():
@@ -301,3 +313,16 @@ def test_initialize_mentions_scan_switch():
     assert "disabled" in disabled[0]["result"]["instructions"].lower()
     _, enabled, _ = _run([initialize], allow_scan=True)
     assert "enabled" in enabled[0]["result"]["instructions"].lower()
+
+
+def test_oversized_request_is_rejected(monkeypatch):
+    import core.mcp_server as server
+
+    monkeypatch.setattr(server, "MAX_MESSAGE_CHARS", 100)
+    raw = '{"jsonrpc":"2.0","id":1,"method":"ping","pad":"' + "x" * 200 + '"}\n'
+    code, replies, _ = _run_raw(raw)
+
+    assert code == 0
+    assert replies[0]["id"] is None
+    assert replies[0]["error"]["code"] == -32600
+    assert "too large" in replies[0]["error"]["message"]

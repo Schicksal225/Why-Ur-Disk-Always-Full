@@ -9,6 +9,7 @@ of a scanned tree.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from core.paths import get_data_dir
 from core.projects import finalize_projects
 from core.safety import deletion_allowed, is_cache_clean_path
 from core.scanner import (
+    audit_cache_path,
     load_audit_cache,
     result_to_dict,
     save_audit_cache,
@@ -43,6 +45,7 @@ STALE_AFTER_HOURS = 24
 MB = 1024**2
 
 FINDING_ACTIONS = ("cache_clean", "recycle_suggest", "advice_only", "readonly")
+RISK_LEVELS = ("low", "medium", "high")
 FINDING_FIELDS = (
     "id",
     "label",
@@ -257,6 +260,42 @@ def _freshness(cache: dict | None, drive: str | None = None) -> tuple[bool, floa
 
 
 # ---------------------------------------------------------------- 4.1 drives_list
+def _scan_result_for(cache: object, drive: str) -> dict | None:
+    if not isinstance(cache, dict):
+        return None
+    results = cache.get("results")
+    for item in results if isinstance(results, list) else []:
+        if isinstance(item, dict) and _root_matches(item.get("root"), drive):
+            return item
+    return None
+
+
+def _drive_scan_stats(cache: object, drive: str) -> dict[str, Any] | None:
+    """Coverage of the last stored scan for one drive, if the cache has it."""
+    result = _scan_result_for(cache, drive)
+    if result is None:
+        return None
+    scanned_at = result.get("scanned_at")
+    return {
+        "scanned_at": scanned_at if isinstance(scanned_at, str) else None,
+        "total_bytes": _size(result.get("total_bytes")),
+        "file_count": _size(result.get("file_count")),
+        "dir_count": _size(result.get("dir_count")),
+        "skipped_errors": _size(result.get("skipped_errors")),
+        "skipped_reparse": _size(result.get("skipped_reparse")),
+        "cancelled": bool(result.get("cancelled")),
+    }
+
+
+def _cache_info(cache: object) -> dict[str, Any]:
+    results = cache.get("results") if isinstance(cache, dict) else None
+    return {
+        "path": str(audit_cache_path()),
+        "exists": isinstance(cache, dict),
+        "results": len([item for item in results if isinstance(item, dict)]) if isinstance(results, list) else 0,
+    }
+
+
 def _drives_list(args: dict[str, Any]) -> str:
     if args:
         raise ToolError(f"unknown argument: {sorted(args)[0]}")
@@ -285,9 +324,10 @@ def _drives_list(args: dict[str, Any]) -> str:
                 "scanned_at": scanned_at,
                 "scan_age_hours": scan_age_hours,
                 "stale": age_hours is None or age_hours > STALE_AFTER_HOURS,
+                "last_scan": _drive_scan_stats(cache, drive),
             }
         )
-    return json.dumps({"drives": drives}, ensure_ascii=False)
+    return json.dumps({"drives": drives, "cache": _cache_info(cache)}, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------- 4.2 findings_query
@@ -298,21 +338,42 @@ def _current_selectable(item: dict, protected_paths: list[str]) -> bool:
     path = item.get("path")
     if not isinstance(path, str) or not path:
         return False
-    allowed, _reason = deletion_allowed(path, protected_paths)
-    if not allowed:
+    try:
+        allowed, _reason = deletion_allowed(path, protected_paths)
+        if not allowed:
+            return False
+        if item.get("action") == "cache_clean":
+            return bool(is_cache_clean_path(path))
+        return True
+    except Exception:  # noqa: BLE001 - a broken path must not break the query
         return False
-    if item.get("action") == "cache_clean":
-        return bool(is_cache_clean_path(path))
-    return True
 
 
 def _findings_query(args: dict[str, Any]) -> str:
     _reject_unknown(
-        args, {"action", "min_size_mb", "drive", "include_locked", "limit", "offset"}
+        args,
+        {
+            "action",
+            "min_size_mb",
+            "drive",
+            "category",
+            "risk",
+            "include_locked",
+            "limit",
+            "offset",
+        },
     )
     action = args.get("action")
     if action is not None and action not in FINDING_ACTIONS:
         raise ToolError("action must be one of: " + ", ".join(FINDING_ACTIONS))
+    risk = args.get("risk")
+    if risk is not None and risk not in RISK_LEVELS:
+        raise ToolError("risk must be one of: " + ", ".join(RISK_LEVELS))
+    category = args.get("category")
+    if category is not None:
+        if not isinstance(category, str) or not category.strip() or len(category) > 64:
+            raise ToolError("category must be a short non-empty string")
+        category = category.strip()
     min_size_bytes = int(_number_arg(args, "min_size_mb", 0.0, 0.0) * MB)
     drive = _drive_arg(args.get("drive"), required=False)
     include_locked = _bool_arg(args, "include_locked", False)
@@ -328,6 +389,10 @@ def _findings_query(args: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         if action is not None and item.get("action") != action:
+            continue
+        if risk is not None and item.get("risk") != risk:
+            continue
+        if category is not None and item.get("category") != category:
             continue
         if not _path_on_drive(item.get("path"), drive):
             continue
@@ -380,6 +445,7 @@ def _project_node(node: dict, levels: int) -> dict[str, Any]:
         "name": node.get("name"),
         "path": node.get("path"),
         "size": _size(node.get("size")),
+        "file_count": _size(node.get("file_count")),
         "protected": node.get("protected") or "",
         "children": [],
     }
@@ -436,12 +502,16 @@ def _collect_regen_dirs(
             continue
         kind = entry.get("kind")
         kind_text = kind if isinstance(kind, str) else ""
+        try:
+            restore = restore_command(project_path, kind_text)
+        except (OSError, ValueError):
+            restore = ""
         rows.append(
             {
                 "path": path,
                 "kind": kind_text,
                 "bytes": _size(entry.get("bytes")),
-                "restore": restore_command(project_path, kind_text),
+                "restore": restore,
             }
         )
     subprojects = project.get("subprojects")
@@ -488,6 +558,7 @@ def _projects_list(args: dict[str, Any]) -> str:
                 "path": path,
                 "project_type": project.get("project_type"),
                 "size": _size(project.get("size")),
+                "file_count": _size(project.get("file_count")),
                 "regen_bytes": regen_total,
                 "regenerable_dirs": _collect_regen_dirs(path, project),
                 "git": {
@@ -565,11 +636,16 @@ def _plan_candidates(
         if not isinstance(path, str) or not path:
             skipped.append({"id": candidate, "label": label, "reason": "没有可执行路径"})
             continue
-        allowed, reason = deletion_allowed(path, protected_paths)
+        try:
+            allowed, reason = deletion_allowed(path, protected_paths)
+            cache_clean_ok = action != "cache_clean" or is_cache_clean_path(path)
+        except Exception:  # noqa: BLE001 - a broken path is a skip, not a crash
+            skipped.append({"id": candidate, "label": label, "reason": "安全校验出错，已跳过"})
+            continue
         if not allowed:
             skipped.append({"id": candidate, "label": label, "reason": reason or "安全校验拒绝"})
             continue
-        if action == "cache_clean" and not is_cache_clean_path(path):
+        if not cache_clean_ok:
             skipped.append({"id": candidate, "label": label, "reason": "不在可清理的缓存目录内"})
             continue
         executable.append(row)
@@ -662,15 +738,18 @@ def _handoff_export(args: dict[str, Any]) -> str:
     dest_root: Path | None = None
     if dest is not None:
         raw = dest.strip()
-        candidate = Path(raw)
+        try:
+            candidate = Path(raw)
+        except (OSError, ValueError) as exc:
+            raise ToolError("dest must be a relative path under the exports directory") from exc
         if candidate.is_absolute() or candidate.drive or raw.startswith(("\\\\", "//")):
             raise ToolError("dest must be a relative path under the exports directory")
         exports_root = (get_data_dir() / "exports").resolve()
-        resolved = (exports_root / raw).resolve()
         try:
+            resolved = (exports_root / raw).resolve()
             resolved.relative_to(exports_root)
-        except ValueError:
-            raise ToolError("dest must stay under the exports directory") from None
+        except (OSError, ValueError) as exc:
+            raise ToolError("dest must stay under the exports directory") from exc
         if resolved == exports_root:
             raise ToolError("dest must name a subdirectory, not the exports root")
         dest_root = resolved
@@ -736,6 +815,50 @@ def _release_scan_lock() -> None:
         _scan_lock_path().unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """Best-effort liveness check for the pid recorded in the scan lock."""
+    if pid <= 0 or os.name != "nt":
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        # Access denied means the process exists but belongs to someone else.
+        return ctypes.get_last_error() == 5
+    except (AttributeError, OSError):
+        return False
+
+
+def _lock_is_stale(lock: Path) -> bool:
+    """A lock is stale when its owner pid is gone, or when it is too old."""
+    try:
+        text = lock.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    match = re.search(r"pid=(\d+)", text)
+    if match:
+        return not _pid_alive(int(match.group(1)))
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except OSError:
+        return False
+    return age > SCAN_LOCK_MAX_AGE
+
+
+def _watch_scan_deadline(job: _ScanJob) -> None:
+    """Cancel a scan at its deadline even if the scanner stops reporting progress."""
+    while job.state == "running":
+        time.sleep(0.2)
+        if job.state != "running":
+            return
+        if time.monotonic() - job.started > job.timeout_seconds:
+            job.timed_out = True
+            job.cancel.set()
+            return
 
 
 def _finding_objects(rows: list[dict]) -> list[Finding]:
@@ -839,11 +962,7 @@ def _scan_start(args: dict[str, Any]) -> str:
         except OSError as exc:
             raise ToolError(f"cannot prepare the scan lock: {exc}") from exc
         if lock.exists():
-            try:
-                age = time.time() - lock.stat().st_mtime
-            except OSError:
-                age = 0.0
-            if age > SCAN_LOCK_MAX_AGE:
+            if _lock_is_stale(lock):
                 try:
                     lock.unlink(missing_ok=True)
                 except OSError:
@@ -858,7 +977,7 @@ def _scan_start(args: dict[str, Any]) -> str:
             raise ToolError(f"cannot create the scan lock: {exc}") from exc
         job_id = "scan-" + datetime.now().strftime("%Y%m%d-%H%M%S")
         try:
-            os.write(handle, (job_id + "\n").encode("utf-8"))
+            os.write(handle, f"{job_id} pid={os.getpid()}\n".encode("utf-8"))
         finally:
             os.close(handle)
 
@@ -872,6 +991,13 @@ def _scan_start(args: dict[str, Any]) -> str:
         _SCAN_JOB = job
         thread = threading.Thread(target=_run_scan_job, args=(job,), name="pcopt-mcp-scan", daemon=True)
         thread.start()
+        watchdog = threading.Thread(
+            target=_watch_scan_deadline,
+            args=(job,),
+            name="pcopt-mcp-scan-watchdog",
+            daemon=True,
+        )
+        watchdog.start()
 
     return json.dumps(
         {
@@ -942,7 +1068,10 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Read-only drive capacity and free space from the OS, plus the "
             "timestamp, age and staleness of the last PC Optimizer audit scan "
-            "for each drive. Does not scan, delete, move or modify files."
+            "for each drive and the coverage of that scan (bytes, files, dirs, "
+            "skipped entries, cancelled flag). 'cache' names the audit cache file "
+            "in use, which helps diagnose stale or missing data. Does not scan, "
+            "delete, move or modify files."
         ),
         "inputSchema": _ADDITIONAL_PROPERTIES_FALSE,
     },
@@ -962,6 +1091,16 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": list(FINDING_ACTIONS),
                     "description": "Only findings with this action.",
+                },
+                "category": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "Only findings with this category (for example 缓存, 安装包, 重复文件, 空文件夹, 建议).",
+                },
+                "risk": {
+                    "type": "string",
+                    "enum": list(RISK_LEVELS),
+                    "description": "Only findings with this risk level.",
                 },
                 "min_size_mb": {
                     "type": "number",
@@ -993,10 +1132,11 @@ TOOLS: list[dict[str, Any]] = [
         "name": "dir_children",
         "description": (
             "Read-only children of a directory node from the last audit scan's "
-            "stored tree (max 40 children per level, stored to depth 4). depth "
-            "selects how many levels below the node to return and is capped at "
-            "2. Paths outside the scanned tree for that drive are rejected. "
-            "Does not read file contents or modify anything."
+            "stored tree (max 40 children per level, stored to depth 4). Nodes "
+            "carry path, size, file_count and protected flag. depth selects how "
+            "many levels below the node to return and is capped at 2. Paths "
+            "outside the scanned tree for that drive are rejected. Does not read "
+            "file contents or modify anything."
         ),
         "inputSchema": {
             "type": "object",
@@ -1028,10 +1168,10 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Read-only projects from the last audit scan with their rebuildable "
             "directories (node_modules, target, .venv, ...), the command that "
-            "recreates each directory, git metadata and risk note. sort is "
-            "regen (default), size or idle; min_regen_mb drops projects whose "
-            "own rebuildable bytes are below the threshold. Does not delete or "
-            "modify anything."
+            "recreates each directory, git metadata, size/file_count and risk "
+            "note. sort is regen (default), size or idle; min_regen_mb drops "
+            "projects whose own rebuildable bytes are below the threshold. Does "
+            "not delete or modify anything."
         ),
         "inputSchema": {
             "type": "object",

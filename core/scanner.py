@@ -527,7 +527,17 @@ def audit_cache_path() -> Path:
 def save_audit_cache(payload: dict) -> Path:
     path = audit_cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    # Write beside the target and replace it in one step: a crash or a second
+    # writer never leaves a half-written scan_cache.json behind.
+    temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
     return path
 
 

@@ -204,6 +204,8 @@ def test_tools_list_has_complete_schemas():
         "action",
         "min_size_mb",
         "drive",
+        "category",
+        "risk",
         "include_locked",
         "limit",
         "offset",
@@ -352,6 +354,7 @@ def test_projects_default_sort_and_shape(cache):
         "path",
         "project_type",
         "size",
+        "file_count",
         "regen_bytes",
         "regenerable_dirs",
         "git",
@@ -724,3 +727,171 @@ def test_fresh_lock_blocks_scan(monkeypatch):
     with pytest.raises(ToolError):
         call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 5})
     assert mcp_tools._SCAN_JOB is None
+
+
+# ---------------------------------------------------------------- P5 reliability & capability
+def test_findings_category_and_risk_filters(cache):
+    cache["findings"][0]["category"] = "缓存"
+    cache["findings"][1]["category"] = "缓存"
+    cache["findings"][2]["category"] = "安装包"
+    cache["findings"][4]["risk"] = "high"
+    by_category = _payload("findings_query", {"category": "缓存", "include_locked": True})
+    assert {row["id"] for row in by_category["findings"]} == {"c1", "c2"}
+    by_risk = _payload("findings_query", {"risk": "high", "include_locked": True})
+    assert {row["id"] for row in by_risk["findings"]} == {"o1"}
+    with pytest.raises(ToolError):
+        call_tool("findings_query", {"category": "   "})
+    with pytest.raises(ToolError):
+        call_tool("findings_query", {"risk": "critical"})
+
+
+def test_tools_survive_a_malformed_cache(monkeypatch):
+    bad = {
+        "findings": [
+            None,
+            3,
+            {"id": 1},
+            {"id": "x", "path": 5, "size": "big", "action": "cache_clean"},
+        ],
+        "projects": [
+            None,
+            {"path": 3, "regenerable": "x", "regenerable_dirs": [None, {"path": 5}]},
+        ],
+        "results": [None, {"root": 5, "tree": 7}],
+    }
+    monkeypatch.setattr(mcp_tools, "load_audit_cache", lambda: bad)
+    monkeypatch.setattr(mcp_tools, "get_disk_usage", lambda: [{"drive": "C"}])
+    monkeypatch.setattr(mcp_tools, "Store", lambda: SimpleNamespace(protected_paths=[]))
+    monkeypatch.setattr(mcp_tools, "deletion_allowed", lambda path, protected: (True, ""))
+    monkeypatch.setattr(mcp_tools, "is_cache_clean_path", lambda path: True)
+
+    findings = _payload("findings_query", {"include_locked": True})
+    assert findings["total"] == 2
+    projects = _payload("projects_list")
+    assert projects["total"] == 1
+    plan = _payload("cleanup_plan", {"candidate_ids": ["x"]})
+    assert plan["steps"] == []
+    assert plan["skipped"][0]["id"] == "x"
+    drives = _payload("drives_list")
+    assert drives["cache"]["results"] == 1
+    with pytest.raises(ToolError):
+        call_tool("dir_children", {"drive": "C", "path": "C:\\x"})
+
+
+def test_findings_and_plan_survive_safety_errors(cache, monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise OSError("safety gate broke")
+
+    monkeypatch.setattr(mcp_tools, "deletion_allowed", boom)
+    payload = _payload("findings_query", {"include_locked": True})
+    assert all(row["selectable"] is False for row in payload["findings"])
+    plan = _payload("cleanup_plan", {"candidate_ids": ["c1"]})
+    assert plan["steps"] == []
+    assert plan["skipped"][0]["reason"].startswith("安全校验出错")
+
+
+def test_projects_survive_restore_errors(cache, monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise OSError("restore broke")
+
+    monkeypatch.setattr(mcp_tools, "restore_command", boom)
+    payload = _payload("projects_list")
+    assert payload["total"] == 3
+    assert all(
+        entry["restore"] == ""
+        for row in payload["projects"]
+        for entry in row["regenerable_dirs"]
+    )
+
+
+def test_dir_children_and_projects_include_file_counts(cache):
+    cache["results"][0]["tree"]["children"][0]["file_count"] = 7
+    cache["projects"][0]["file_count"] = 42
+    node = _payload("dir_children", {"drive": "C", "path": "C:\\Users"})["node"]
+    assert node["file_count"] == 7
+    studio = _payload("projects_list")["projects"][1]
+    assert studio["name"] == "studio"
+    assert studio["file_count"] == 42
+
+
+def test_drives_list_reports_cache_and_scan_coverage(cache, monkeypatch):
+    cache["results"][0].update(
+        {
+            "total_bytes": 123,
+            "file_count": 4,
+            "dir_count": 2,
+            "skipped_errors": 1,
+            "skipped_reparse": 3,
+            "cancelled": False,
+        }
+    )
+    monkeypatch.setattr(
+        mcp_tools, "get_disk_usage", lambda: [{"drive": "C"}, {"drive": "D"}, {"drive": "E"}]
+    )
+    payload = _payload("drives_list")
+    assert payload["cache"]["exists"] is True
+    assert payload["cache"]["results"] == 2
+    assert payload["cache"]["path"].endswith("scan_cache.json")
+    by_drive = {row["drive"]: row for row in payload["drives"]}
+    assert by_drive["C"]["last_scan"] == {
+        "scanned_at": by_drive["C"]["last_scan"]["scanned_at"],
+        "total_bytes": 123,
+        "file_count": 4,
+        "dir_count": 2,
+        "skipped_errors": 1,
+        "skipped_reparse": 3,
+        "cancelled": False,
+    }
+    assert by_drive["E"]["last_scan"] is None
+
+
+def test_lock_with_dead_pid_is_reclaimed(monkeypatch):
+    _patch_scan(monkeypatch)
+    LOCK_PATH.write_text("scan-dead pid=999999\n", encoding="utf-8")
+    call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 5})
+    _wait_scan(("done",))
+    assert not LOCK_PATH.exists()
+
+
+def test_lock_with_live_pid_blocks(monkeypatch):
+    _patch_scan(monkeypatch)
+    LOCK_PATH.write_text(f"scan-live pid={os.getpid()}\n", encoding="utf-8")
+    with pytest.raises(ToolError):
+        call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 5})
+
+
+def test_watchdog_cancels_even_if_scanner_ignores_progress(monkeypatch):
+    _patch_scan(monkeypatch)
+
+    def stubborn(root, *, cancel=None, progress=None, collect_duplicates=False):
+        time.sleep(1.4)
+        return SimpleNamespace(
+            root=str(root),
+            total_bytes=0,
+            file_count=0,
+            dir_count=0,
+            skipped_errors=0,
+            skipped_reparse=0,
+            cancelled=False,
+            tree=None,
+            categories={},
+            large_files=[],
+            stale_files=[],
+            cache_dirs=[],
+            projects=[],
+            dup_candidates=[],
+        )
+
+    monkeypatch.setattr(mcp_tools, "scan_path", stubborn)
+    call_tool("scan_start", {"drives": ["C"], "timeout_seconds": 1})
+    timed_out = _wait_scan(("timeout",), timeout=5.0)
+    assert timed_out["cache_saved"] is False
+    assert timed_out["elapsed_seconds"] >= 1.0
+
+
+def test_handoff_export_rejects_invalid_path_characters(cache, monkeypatch):
+    calls = []
+    monkeypatch.setattr(mcp_tools, "export_handoff", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(ToolError):
+        call_tool("handoff_export", {"dest": "a\u0000b"})
+    assert calls == []

@@ -93,10 +93,10 @@ codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox --js
 
 | 工具 | 作用 | 参数 |
 |------|------|------|
-| `drives_list` | 盘符容量、剩余空间、上次盘查时间与新鲜度 | 无 |
-| `findings_query` | 查上次盘查的发现项，按体积排序、分页 | `action`、`min_size_mb`、`drive`、`include_locked`、`limit`（≤200）、`offset` |
-| `dir_children` | 查缓存目录树里某个目录的子目录 | `drive`、`path`、`depth`（1–2） |
-| `projects_list` | 项目、可重建目录、恢复命令、git 状态 | `sort`（regen/size/idle）、`min_regen_mb` |
+| `drives_list` | 盘符容量、剩余空间、上次盘查时间与新鲜度；`last_scan` 给出该盘上次扫描的覆盖情况（字节/文件/目录/跳过项/是否取消），`cache` 给出当前使用的缓存文件路径 | 无 |
+| `findings_query` | 查上次盘查的发现项，按体积排序、分页；可按类别和风险过滤 | `action`、`category`、`risk`、`min_size_mb`、`drive`、`include_locked`、`limit`（≤200）、`offset` |
+| `dir_children` | 查缓存目录树里某个目录的子目录（含体积、文件数、保护标记） | `drive`、`path`、`depth`（1–2） |
+| `projects_list` | 项目、可重建目录、恢复命令、git 状态、体积/文件数 | `sort`（regen/size/idle）、`min_regen_mb` |
 | `cleanup_plan` | **演练**清理计划，标出永久删除风险 | `candidate_ids`、`min_age_days` |
 | `handoff_export` | 导出与「导出给 AI」相同的清单 | `dest`（可选，exports 下相对子目录） |
 | `scan_start` | 后台盘查指定盘（需 `--mcp-allow-scan`） | `drives`、`duplicates`、`timeout_seconds`（1–300） |
@@ -105,6 +105,12 @@ codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox --js
 `findings_query` 默认不带只读/仅建议项；想和 GUI「存储盘查」页逐条对齐时传
 `"include_locked": true`。返回字段与界面一致：id、label、action、risk、size、path、
 reason、suggestion、selectable、selected，外加 `total/stale/scan_age_hours`。
+`category` 的常见取值：缓存、安装包、重复文件、空文件夹、系统、项目、镜像、视频、
+聊天文件、建议；`risk` 为 low/medium/high。
+
+如果 `drives_list` 里的 `stale` 一直是 true，或 `cache.results` 为 0，通常是 GUI 和 MCP
+读的**数据目录不是同一个**：MCP 默认读 exe 同目录的 `scan_cache.json`。让两边用同一份
+exe，或给两边设置同一个 `PCOPT_DATA_DIR` 环境变量即可；`cache.path` 会直接告诉你是哪个文件。
 
 ## 典型对话
 
@@ -125,8 +131,9 @@ reason、suggestion、selectable、selected，外加 `total/stale/scan_age_hours
 ## 数据暴露说明
 
 把 exe 配置进客户端，等于允许该客户端及其背后的模型读取你在界面里盘查出的
-**路径、体积、项目名和 git 状态**。不含文件内容，也不需要管理员权限；信息量与手动
-导出 `REPORT.md` 相同，只是更实时。是否接受由你决定。
+**路径、体积、项目名和 git 状态**，以及审计缓存文件的位置（用于排查数据目录不一致）。
+不含文件内容，也不需要管理员权限；信息量与手动导出 `REPORT.md` 相同，只是更实时。
+是否接受由你决定。
 
 `mcp.log` 只记录时间、工具名、是否成功和耗时，不记录路径。
 
