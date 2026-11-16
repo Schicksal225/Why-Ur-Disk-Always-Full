@@ -55,6 +55,15 @@ claude mcp add pcoptimizer -- "C:\Users\A\AppData\Local\PCOptimizer\PCOptimizer.
 
 或写进项目的 `.mcp.json`，结构同上面的 Cursor 示例。
 
+已在 Claude Code 2.1.217（DeepSeek 后端）实测：工具以 `mcp__<serverName>__drives_list`
+的形式出现，调用正常。脚本/非交互场景可以临时加载配置、不碰全局设置：
+
+```bat
+claude -p "用 pcoptimizer 看看 C 盘剩余空间" --mcp-config mcp.json --strict-mcp-config --allowedTools "mcp__pcoptimizer__drives_list"
+```
+
+其中 `mcp.json` 与上面的 Cursor 结构相同，再加 `"type": "stdio"`。
+
 ## Codex
 
 Codex CLI 支持 MCP（下面这套在 codex-cli 0.154.0 上实测通过）。最省事的方式是命令行注册：
