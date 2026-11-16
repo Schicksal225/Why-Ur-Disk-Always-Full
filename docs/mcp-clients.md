@@ -57,12 +57,27 @@ claude mcp add pcoptimizer -- "C:\Users\A\AppData\Local\PCOptimizer\PCOptimizer.
 
 ## Codex
 
-`~/.codex/config.toml`：
+Codex CLI 支持 MCP（下面这套在 codex-cli 0.154.0 上实测通过）。最省事的方式是命令行注册：
+
+```bat
+codex mcp add pcoptimizer -- "C:\Users\A\AppData\Local\PCOptimizer\PCOptimizer.exe" --mcp
+codex mcp list
+```
+
+也可以直接写 `~/.codex/config.toml`：
 
 ```toml
 [mcp_servers.pcoptimizer]
 command = 'C:\Users\A\AppData\Local\PCOptimizer\PCOptimizer.exe'
 args = ["--mcp"]
+```
+
+注意 Codex 默认**先询问再调用 MCP 工具**：交互模式确认一次即可；非交互的 `codex exec`
+需要显式放开批准策略，否则工具调用会报
+`MCP tool call requires approval, but approval policy is never`：
+
+```bat
+codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox --json "Call the pcoptimizer MCP tool drives_list and report the C: free_gb value."
 ```
 
 ## 工具一览（默认 6 个，加 `--mcp-allow-scan` 后 8 个）
